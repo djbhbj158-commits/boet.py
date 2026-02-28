@@ -2,8 +2,6 @@ python-telegram-bot==20.7
 python-telegram-bot[job-queue]
 aiofiles==23.2.1
 colorama==0.4.6
-asyncio==3.4.3
-cryptography==41.0.7
-pytz==2023.3
+pytz==2024.1
+cryptography==42.0.5
 requests==2.31.0
-telethon==1.34.0
