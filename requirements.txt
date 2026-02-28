@@ -1,1 +1,5 @@
-requests
+python-telegram-bot==20.7
+python-telegram-bot[job-queue]
+aiofiles==23.2.1
+async-timeout==4.0.3
+colorama==0.4.6
