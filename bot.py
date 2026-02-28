@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-بوت تمويل متكامل لتليجرام - النسخة الكاملة
-الإصدار: 2.0
+بوت تمويل متكامل لتليجرام - النسخة النهائية المصححة
+الإصدار: 3.0
 المطور: System
 تاريخ التحديث: 2024
 """
@@ -23,12 +23,13 @@ from pathlib import Path
 from collections import defaultdict
 from enum import Enum
 import traceback
+from functools import wraps
 
 import aiofiles
 from colorama import init, Fore, Style
 import pytz
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -36,8 +37,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ConversationHandler,
     ContextTypes,
-    filters,
-    PicklePersistence
+    filters
 )
 from telegram.constants import ParseMode, ChatMemberStatus
 from telegram.error import TelegramError, BadRequest, Forbidden, RetryAfter
@@ -87,33 +87,26 @@ class States(Enum):
     ADMIN_ADD_POINTS = 100
     ADMIN_DEDUCT_POINTS = 101
     ADMIN_ADD_NUMBERS = 102
-    ADMIN_DELETE_NUMBERS = 103
-    ADMIN_ADD_SUPPORT = 104
-    ADMIN_ADD_CHANNEL = 105
-    ADMIN_BAN_USER = 106
-    ADMIN_UNBAN_USER = 107
-    ADMIN_CHANGE_REWARD = 108
-    ADMIN_CHANGE_PRICE = 109
-    ADMIN_ADD_MANDATORY = 110
-    ADMIN_DELETE_MANDATORY = 111
-    ADMIN_CHANGE_WELCOME = 112
-    ADMIN_BROADCAST = 113
-    ADMIN_BACKUP = 114
-    ADMIN_RESTORE = 115
-    ADMIN_VIEW_FILES = 116
-    ADMIN_FINANCING_CONTROL = 117
+    ADMIN_ADD_SUPPORT = 103
+    ADMIN_ADD_CHANNEL = 104
+    ADMIN_BAN_USER = 105
+    ADMIN_UNBAN_USER = 106
+    ADMIN_CHANGE_REWARD = 107
+    ADMIN_CHANGE_PRICE = 108
+    ADMIN_ADD_MANDATORY = 109
+    ADMIN_CHANGE_WELCOME = 110
+    ADMIN_BROADCAST = 111
 
 # ==================== قاعدة البيانات ====================
 
 class Database:
-    """قاعدة بيانات البوت - متطورة مع دعم كامل"""
+    """قاعدة بيانات البوت"""
     
     def __init__(self):
         self.data_dir = DATA_DIR
         
         # ملفات البيانات
         self.users_file = self.data_dir / "users.json"
-        self.channels_file = self.data_dir / "channels.json"
         self.numbers_file = self.data_dir / "numbers.json"
         self.settings_file = self.data_dir / "settings.json"
         self.financing_file = self.data_dir / "financing.json"
@@ -121,20 +114,16 @@ class Database:
         self.mandatory_file = self.data_dir / "mandatory.json"
         self.referrals_file = self.data_dir / "referrals.json"
         self.stats_file = self.data_dir / "stats.json"
-        self.logs_file = self.data_dir / "logs.json"
-        self.backup_file = self.data_dir / "backup.json"
         
         # تحميل البيانات
         self.users = self._load_json(self.users_file, {})
-        self.channels = self._load_json(self.channels_file, {})
         self.numbers = self._load_json(self.numbers_file, self._default_numbers())
         self.settings = self._load_json(self.settings_file, self._default_settings())
         self.financing = self._load_json(self.financing_file, {})
-        self.banned = self._load_json(self.banned_file, {})
+        self.banned = self._load_json(self.banned_file, [])
         self.mandatory = self._load_json(self.mandatory_file, [])
         self.referrals = self._load_json(self.referrals_file, {})
         self.stats = self._load_json(self.stats_file, self._default_stats())
-        self.logs = self._load_json(self.logs_file, [])
         
         # قفل للكتابة المتزامنة
         self._lock = asyncio.Lock()
@@ -146,18 +135,15 @@ class Database:
         return {
             "invite_reward": 10,
             "member_price": 8,
-            "welcome_message": "👋 مرحباً بك في بوت التمويل المتكامل\n\n📍 يمكنك تجميع النقاط وتمويل قنواتك بكل سهولة",
+            "welcome_message": "👋 مرحباً بك في بوت التمويل المتكامل\n📍 يمكنك تجميع النقاط وتمويل قنواتك بكل سهولة",
             "support_username": "support",
             "channel_link": "https://t.me/your_channel",
             "min_financing": 10,
             "max_financing": 1000,
             "daily_bonus": 5,
-            "referral_bonus": 5,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
-            "bot_status": "active",
-            "maintenance_mode": False,
-            "version": "2.0"
+            "version": "3.0"
         }
     
     def _default_numbers(self):
@@ -180,9 +166,6 @@ class Database:
             "total_financing": 0,
             "total_spent": 0,
             "total_referrals": 0,
-            "daily_users": [],
-            "daily_financing": [],
-            "commands_count": {},
             "bot_start_time": datetime.now().isoformat(),
             "last_backup": None
         }
@@ -192,9 +175,7 @@ class Database:
         try:
             if file_path.exists():
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    logger.info(f"📂 تم تحميل {file_path.name}")
-                    return data
+                    return json.load(f)
         except Exception as e:
             logger.error(f"❌ خطأ في تحميل {file_path.name}: {e}")
         return default
@@ -203,19 +184,8 @@ class Database:
         """حفظ ملف JSON مع قفل"""
         async with self._lock:
             try:
-                # إنشاء نسخة احتياطية قبل الحفظ
-                if file_path.exists():
-                    backup_path = file_path.with_suffix('.bak')
-                    async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-                        content = await f.read()
-                    async with aiofiles.open(backup_path, 'w', encoding='utf-8') as f:
-                        await f.write(content)
-                
-                # حفظ البيانات الجديدة
                 async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
                     await f.write(json.dumps(data, ensure_ascii=False, indent=2))
-                
-                logger.info(f"💾 تم حفظ {file_path.name}")
                 return True
             except Exception as e:
                 logger.error(f"❌ خطأ في حفظ {file_path.name}: {e}")
@@ -225,15 +195,13 @@ class Database:
         """حفظ جميع البيانات"""
         tasks = [
             self._save_json(self.users_file, self.users),
-            self._save_json(self.channels_file, self.channels),
             self._save_json(self.numbers_file, self.numbers),
             self._save_json(self.settings_file, self.settings),
             self._save_json(self.financing_file, self.financing),
             self._save_json(self.banned_file, self.banned),
             self._save_json(self.mandatory_file, self.mandatory),
             self._save_json(self.referrals_file, self.referrals),
-            self._save_json(self.stats_file, self.stats),
-            self._save_json(self.logs_file, self.logs)
+            self._save_json(self.stats_file, self.stats)
         ]
         
         results = await asyncio.gather(*tasks)
@@ -249,29 +217,18 @@ class Database:
                 "points": 0,
                 "referrals": 0,
                 "referral_code": self._generate_code(),
-                "referrals_list": [],
                 "financing_count": 0,
                 "total_spent": 0,
                 "total_earned": 0,
                 "joined_date": datetime.now().isoformat(),
                 "last_active": datetime.now().isoformat(),
                 "last_daily": None,
-                "warn_count": 0,
-                "is_banned": False,
-                "ban_reason": None,
-                "notes": "",
-                "language": "ar",
                 "username": None,
-                "first_name": None,
-                "last_name": None
+                "first_name": None
             }
-            
-            # تحديث الإحصائيات
             self.stats["total_users"] = len(self.users)
         
-        # تحديث آخر نشاط
         self.users[user_id]["last_active"] = datetime.now().isoformat()
-        
         return self.users[user_id]
     
     def _generate_code(self, length: int = 8) -> str:
@@ -284,49 +241,25 @@ class Database:
         if user_id in self.users:
             self.users[user_id].update(kwargs)
     
-    def add_points(self, user_id: int, points: int, reason: str = "") -> bool:
+    def add_points(self, user_id: int, points: int) -> bool:
         """إضافة نقاط لمستخدم"""
         user_id = str(user_id)
-        user = self.get_user(user_id)
+        user = self.get_user(int(user_id))
         user["points"] += points
         user["total_earned"] += points
-        
-        # تسجيل العملية
-        self._add_log({
-            "type": "add_points",
-            "user_id": user_id,
-            "points": points,
-            "reason": reason,
-            "timestamp": datetime.now().isoformat()
-        })
-        
+        self.stats["total_points"] += points
         return True
     
-    def deduct_points(self, user_id: int, points: int, reason: str = "") -> bool:
+    def deduct_points(self, user_id: int, points: int) -> bool:
         """خصم نقاط من مستخدم"""
         user_id = str(user_id)
-        user = self.get_user(user_id)
+        user = self.get_user(int(user_id))
         if user["points"] >= points:
             user["points"] -= points
-            
-            # تسجيل العملية
-            self._add_log({
-                "type": "deduct_points",
-                "user_id": user_id,
-                "points": points,
-                "reason": reason,
-                "timestamp": datetime.now().isoformat()
-            })
-            
+            user["total_spent"] += points
+            self.stats["total_spent"] += points
             return True
         return False
-    
-    def _add_log(self, log_entry: Dict):
-        """إضافة سجل جديد"""
-        self.logs.append(log_entry)
-        # الاحتفاظ بآخر 1000 سجل فقط
-        if len(self.logs) > 1000:
-            self.logs = self.logs[-1000:]
     
     # ========== إدارة الدعوات ==========
     
@@ -335,38 +268,23 @@ class Database:
         referrer_id = str(referrer_id)
         new_user_id = str(new_user_id)
         
-        # منع الدعوة الذاتية
         if referrer_id == new_user_id:
             return False
         
-        # التحقق من عدم تكرار الدعوة
         if referrer_id not in self.referrals:
             self.referrals[referrer_id] = []
         
         if new_user_id in self.referrals[referrer_id]:
             return False
         
-        # إضافة الدعوة
         self.referrals[referrer_id].append(new_user_id)
-        
-        # إضافة نقاط للداعي
         reward = self.settings["invite_reward"]
-        self.add_points(int(referrer_id), reward, "مكافأة دعوة")
+        self.add_points(int(referrer_id), reward)
         
-        # تحديث إحصائيات الداعي
         referrer = self.get_user(int(referrer_id))
         referrer["referrals"] += 1
-        if "referrals_list" not in referrer:
-            referrer["referrals_list"] = []
-        referrer["referrals_list"].append({
-            "user_id": new_user_id,
-            "date": datetime.now().isoformat(),
-            "reward": reward
-        })
         
-        # تحديث الإحصائيات العامة
         self.stats["total_referrals"] += 1
-        
         return True
     
     def get_referral_link(self, user_id: int, bot_username: str) -> str:
@@ -374,11 +292,23 @@ class Database:
         user = self.get_user(user_id)
         return f"https://t.me/{bot_username}?start={user['referral_code']}"
     
+    def get_top_referrers(self, limit: int = 3) -> List[Dict]:
+        """الحصول على أفضل الداعين"""
+        referrers = []
+        for user_id, ref_list in self.referrals.items():
+            referrers.append({
+                "user_id": user_id,
+                "count": len(ref_list),
+                "username": self.users.get(user_id, {}).get("username", "Unknown")
+            })
+        
+        referrers.sort(key=lambda x: x["count"], reverse=True)
+        return referrers[:limit]
+    
     # ========== إدارة الأرقام ==========
     
     def add_numbers_file(self, filename: str, numbers: List[str]) -> Dict:
         """إضافة ملف أرقام جديد"""
-        # تنظيف الأرقام والتحقق منها
         valid_numbers = []
         invalid_numbers = []
         
@@ -387,12 +317,8 @@ class Database:
             if not num:
                 continue
             
-            # تنظيف الرقم
             cleaned = re.sub(r'[^0-9+]', '', num)
-            
-            # التحقق من صحة الرقم (يبدأ بـ 00963 أو +963 أو 963)
             if re.match(r'^(00963|\+963|963)\d{8,9}$', cleaned):
-                # توحيد التنسيق
                 if cleaned.startswith('00963'):
                     cleaned = '+' + cleaned[1:]
                 elif cleaned.startswith('963') and not cleaned.startswith('+'):
@@ -401,7 +327,6 @@ class Database:
             else:
                 invalid_numbers.append(num)
         
-        # إضافة الأرقام الصالحة
         file_info = {
             "name": filename,
             "count": len(valid_numbers),
@@ -421,19 +346,16 @@ class Database:
     def get_available_numbers(self, count: int) -> List[str]:
         """الحصول على أرقام متاحة للتمويل"""
         available = []
-        numbers_copy = self.numbers["numbers"].copy()
+        for _ in range(min(count, len(self.numbers["numbers"]))):
+            if self.numbers["numbers"]:
+                num = self.numbers["numbers"].pop(0)
+                available.append(num)
+                self.numbers["used_numbers"].append({
+                    "number": num,
+                    "used_at": datetime.now().isoformat()
+                })
         
-        for i in range(min(count, len(numbers_copy))):
-            num = numbers_copy.pop(0)
-            available.append(num)
-            self.numbers["used_numbers"].append({
-                "number": num,
-                "used_at": datetime.now().isoformat()
-            })
-        
-        self.numbers["numbers"] = numbers_copy
         self.numbers["total_used"] += len(available)
-        
         return available
     
     def get_numbers_stats(self) -> Dict:
@@ -447,18 +369,9 @@ class Database:
             "total_used": self.numbers["total_used"]
         }
     
-    def delete_file(self, filename: str) -> bool:
-        """حذف ملف أرقام"""
-        for i, file_info in enumerate(self.numbers["files"]):
-            if file_info["name"] == filename:
-                self.numbers["files"].pop(i)
-                return True
-        return False
-    
     # ========== إدارة التمويل ==========
     
-    def create_financing(self, user_id: int, channel_link: str, 
-                        members_count: int, cost: int) -> str:
+    def create_financing(self, user_id: int, channel_link: str, members_count: int, cost: int) -> str:
         """إنشاء عملية تمويل جديدة"""
         finance_id = self._generate_code(12)
         user_id = str(user_id)
@@ -467,38 +380,22 @@ class Database:
             "id": finance_id,
             "user_id": user_id,
             "channel_link": channel_link,
-            "channel_id": self._extract_channel_id(channel_link),
             "total_members": members_count,
             "added_members": 0,
-            "status": "pending",  # pending, processing, completed, failed
+            "status": "pending",
             "cost": cost,
             "created_at": datetime.now().isoformat(),
-            "started_at": None,
-            "completed_at": None,
             "last_update": datetime.now().isoformat(),
-            "used_numbers": [],
-            "failed_numbers": [],
-            "notes": ""
+            "used_numbers": []
         }
         
-        # تحديث إحصائيات المستخدم
         user = self.get_user(int(user_id))
         user["financing_count"] += 1
-        user["total_spent"] += cost
         
-        # تحديث الإحصائيات العامة
         self.stats["total_financing"] += 1
         self.stats["total_spent"] += cost
         
         return finance_id
-    
-    def _extract_channel_id(self, link: str) -> str:
-        """استخراج معرف القناة من الرابط"""
-        # محاولة استخراج المعرف من الرابط
-        match = re.search(r'(?:t\.me/|telegram\.me/)([a-zA-Z0-9_]+)', link)
-        if match:
-            return match.group(1)
-        return link
     
     def update_financing(self, finance_id: str, **kwargs) -> Optional[Dict]:
         """تحديث عملية تمويل"""
@@ -517,25 +414,19 @@ class Database:
         if finance["added_members"] >= finance["total_members"]:
             return {"success": False, "error": "اكتمل العدد المطلوب"}
         
-        # إضافة العضو
         finance["added_members"] += 1
-        if "used_numbers" not in finance:
-            finance["used_numbers"] = []
-        
         finance["used_numbers"].append({
             "number": number,
             "added_at": datetime.now().isoformat()
         })
         
-        # التحقق من اكتمال التمويل
         if finance["added_members"] >= finance["total_members"]:
             finance["status"] = "completed"
-            finance["completed_at"] = datetime.now().isoformat()
         
         return {
             "success": True,
             "finance": finance,
-            "completed": finance["added_members"] >= finance["total_members"],
+            "completed": finance["status"] == "completed",
             "progress": f"{finance['added_members']}/{finance['total_members']}"
         }
     
@@ -548,56 +439,39 @@ class Database:
             if finance["user_id"] == user_id
         ]
     
-    def get_active_financing(self) -> List[Dict]:
-        """الحصول على التمويلات النشطة"""
-        return [
-            {**finance, "id": fid}
-            for fid, finance in self.financing.items()
-            if finance["status"] in ["pending", "processing"]
-        ]
-    
     # ========== إدارة الحظر ==========
     
-    def ban_user(self, user_id: int, reason: str = "", admin_id: int = None) -> bool:
+    def is_banned(self, user_id: int) -> bool:
+        """التحقق من حظر المستخدم"""
+        return str(user_id) in self.banned
+    
+    def ban_user(self, user_id: int, reason: str = "") -> bool:
         """حظر مستخدم"""
         user_id = str(user_id)
-        
-        # منع حظر المديرين
         if int(user_id) in ADMIN_IDS:
             return False
         
-        self.banned[user_id] = {
-            "user_id": user_id,
-            "reason": reason,
-            "banned_by": str(admin_id) if admin_id else "system",
-            "banned_at": datetime.now().isoformat(),
-            "expires": None  # يمكن تحديد تاريخ انتهاء
-        }
-        
-        # تحديث حالة المستخدم
-        if user_id in self.users:
-            self.users[user_id]["is_banned"] = True
-            self.users[user_id]["ban_reason"] = reason
-        
-        return True
+        if user_id not in self.banned:
+            self.banned.append({
+                "user_id": user_id,
+                "reason": reason,
+                "banned_at": datetime.now().isoformat()
+            })
+            if user_id in self.users:
+                self.users[user_id]["is_banned"] = True
+            return True
+        return False
     
     def unban_user(self, user_id: int) -> bool:
         """رفع الحظر عن مستخدم"""
         user_id = str(user_id)
-        if user_id in self.banned:
-            del self.banned[user_id]
-            
-            if user_id in self.users:
-                self.users[user_id]["is_banned"] = False
-                self.users[user_id]["ban_reason"] = None
-            
-            return True
+        for i, banned in enumerate(self.banned):
+            if banned["user_id"] == user_id:
+                self.banned.pop(i)
+                if user_id in self.users:
+                    self.users[user_id]["is_banned"] = False
+                return True
         return False
-    
-    def is_banned(self, user_id: int) -> bool:
-        """التحقق من حظر المستخدم"""
-        user_id = str(user_id)
-        return user_id in self.banned
     
     # ========== إدارة القنوات الإجبارية ==========
     
@@ -608,9 +482,7 @@ class Database:
             "link": link,
             "chat_id": chat_id,
             "added_at": datetime.now().isoformat(),
-            "is_active": True,
-            "check_count": 0,
-            "joined_count": 0
+            "is_active": True
         }
         self.mandatory.append(channel)
         return channel
@@ -635,22 +507,13 @@ class Database:
             
             try:
                 chat_id = channel["chat_id"]
-                # محاولة تحويل إلى رقم إذا كان معرف رقمي
                 if str(chat_id).lstrip('-').isdigit():
                     chat_id = int(chat_id)
                 
                 member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-                
-                # تحديث إحصائيات القناة
-                channel["check_count"] = channel.get("check_count", 0) + 1
-                
                 if member.status in [ChatMemberStatus.LEFT, ChatMemberStatus.KICKED]:
                     not_joined.append(channel)
-                else:
-                    channel["joined_count"] = channel.get("joined_count", 0) + 1
-                    
-            except Exception as e:
-                logger.warning(f"خطأ في التحقق من القناة {channel['name']}: {e}")
+            except:
                 not_joined.append(channel)
         
         return len(not_joined) == 0, not_joined
@@ -662,21 +525,14 @@ class Database:
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
         
-        # تحديث الإحصائيات اليومية
-        self.stats["daily_users"] = self.stats.get("daily_users", [])
-        self.stats["daily_financing"] = self.stats.get("daily_financing", [])
-        
-        # حساب المستخدمين النشطين اليوم
         active_today = 0
         for user_data in self.users.values():
             last_active = user_data.get("last_active", "")
             if last_active and last_active.startswith(today):
                 active_today += 1
         
-        # حساب إجمالي النقاط
         total_points = sum(u.get("points", 0) for u in self.users.values())
         
-        # حساب التمويلات اليوم
         financing_today = 0
         for finance in self.financing.values():
             created = finance.get("created_at", "")
@@ -692,98 +548,14 @@ class Database:
             "total_financing": len(self.financing),
             "financing_today": financing_today,
             "completed_financing": sum(1 for f in self.financing.values() if f["status"] == "completed"),
-            "pending_financing": sum(1 for f in self.financing.values() if f["status"] in ["pending", "processing"]),
+            "pending_financing": sum(1 for f in self.financing.values() if f["status"] == "pending"),
             "total_spent": self.stats["total_spent"],
             "total_referrals": self.stats["total_referrals"],
             "banned_count": len(self.banned),
             "numbers": numbers_stats,
             "mandatory_channels": len(self.mandatory),
-            "bot_uptime": self._get_uptime(),
-            "last_backup": self.stats.get("last_backup"),
             "version": self.settings["version"]
         }
-    
-    def _get_uptime(self) -> str:
-        """مدة تشغيل البوت"""
-        start_time = datetime.fromisoformat(self.stats["bot_start_time"])
-        uptime = datetime.now() - start_time
-        
-        days = uptime.days
-        hours = uptime.seconds // 3600
-        minutes = (uptime.seconds % 3600) // 60
-        
-        parts = []
-        if days > 0:
-            parts.append(f"{days} يوم")
-        if hours > 0:
-            parts.append(f"{hours} ساعة")
-        if minutes > 0:
-            parts.append(f"{minutes} دقيقة")
-        
-        return " ".join(parts) if parts else "أقل من دقيقة"
-    
-    def update_stats(self, command: str = None):
-        """تحديث الإحصائيات"""
-        if command:
-            if "commands_count" not in self.stats:
-                self.stats["commands_count"] = {}
-            self.stats["commands_count"][command] = self.stats["commands_count"].get(command, 0) + 1
-    
-    # ========== النسخ الاحتياطي ==========
-    
-    async def create_backup(self) -> Optional[Path]:
-        """إنشاء نسخة احتياطية"""
-        try:
-            backup_data = {
-                "users": self.users,
-                "channels": self.channels,
-                "numbers": self.numbers,
-                "settings": self.settings,
-                "financing": self.financing,
-                "banned": self.banned,
-                "mandatory": self.mandatory,
-                "referrals": self.referrals,
-                "stats": self.stats,
-                "backup_date": datetime.now().isoformat(),
-                "version": self.settings["version"]
-            }
-            
-            backup_filename = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            backup_path = DATA_DIR / backup_filename
-            
-            await self._save_json(backup_path, backup_data)
-            
-            self.stats["last_backup"] = datetime.now().isoformat()
-            
-            return backup_path
-            
-        except Exception as e:
-            logger.error(f"❌ خطأ في إنشاء النسخة الاحتياطية: {e}")
-            return None
-    
-    async def restore_backup(self, backup_path: Path) -> bool:
-        """استعادة نسخة احتياطية"""
-        try:
-            async with aiofiles.open(backup_path, 'r', encoding='utf-8') as f:
-                content = await f.read()
-                backup_data = json.loads(content)
-            
-            self.users = backup_data.get("users", {})
-            self.channels = backup_data.get("channels", {})
-            self.numbers = backup_data.get("numbers", self._default_numbers())
-            self.settings = backup_data.get("settings", self._default_settings())
-            self.financing = backup_data.get("financing", {})
-            self.banned = backup_data.get("banned", {})
-            self.mandatory = backup_data.get("mandatory", [])
-            self.referrals = backup_data.get("referrals", {})
-            self.stats = backup_data.get("stats", self._default_stats())
-            
-            await self.save_all()
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ خطأ في استعادة النسخة الاحتياطية: {e}")
-            return False
 
 # إنشاء كائن قاعدة البيانات
 db = Database()
@@ -803,25 +575,6 @@ class Helpers:
         return str(num)
     
     @staticmethod
-    def format_time(seconds: int) -> str:
-        """تنسيق الوقت"""
-        minutes, seconds = divmod(seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        days, hours = divmod(hours, 24)
-        
-        parts = []
-        if days > 0:
-            parts.append(f"{days} يوم")
-        if hours > 0:
-            parts.append(f"{hours} ساعة")
-        if minutes > 0:
-            parts.append(f"{minutes} دقيقة")
-        if seconds > 0 and not parts:
-            parts.append(f"{seconds} ثانية")
-        
-        return " و ".join(parts) if parts else "0 ثانية"
-    
-    @staticmethod
     def escape_markdown(text: str) -> str:
         """تجنب أحرف Markdown"""
         special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
@@ -832,6 +585,7 @@ class Helpers:
     @staticmethod
     def is_valid_link(link: str) -> bool:
         """التحقق من صحة الرابط"""
+        link = link.strip()
         patterns = [
             r'^https?://t\.me/[a-zA-Z0-9_]+$',
             r'^https?://telegram\.me/[a-zA-Z0-9_]+$',
@@ -845,36 +599,34 @@ class Helpers:
         return False
     
     @staticmethod
-    def clean_phone_number(number: str) -> str:
-        """تنظيف رقم الهاتف"""
-        # إزالة المسافات والرموز غير المرقمة
-        cleaned = re.sub(r'[^\d+]', '', number)
-        
-        # توحيد التنسيق
-        if cleaned.startswith('00963'):
-            cleaned = '+' + cleaned[2:]
-        elif cleaned.startswith('963') and not cleaned.startswith('+'):
-            cleaned = '+' + cleaned
-        
-        return cleaned
+    async def safe_edit_message(query, text: str, reply_markup=None, parse_mode=None):
+        """تعديل الرسالة بأمان"""
+        try:
+            await query.edit_message_text(
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+            return True
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                # تجاهل هذا الخطأ
+                return False
+            logger.warning(f"خطأ في تعديل الرسالة: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"خطأ في تعديل الرسالة: {e}")
+            return False
     
     @staticmethod
     async def safe_send_message(bot, chat_id: int, text: str, **kwargs) -> bool:
-        """إرسال رسالة بأمان مع معالجة الأخطاء"""
+        """إرسال رسالة بأمان"""
         try:
             await bot.send_message(chat_id=chat_id, text=text, **kwargs)
             return True
-        except Forbidden:
-            logger.warning(f"المستخدم {chat_id} حظر البوت")
-        except BadRequest as e:
-            logger.warning(f"خطأ في إرسال الرسالة للمستخدم {chat_id}: {e}")
-        except RetryAfter as e:
-            logger.warning(f"تم تجاوز الحد المسموح، الانتظار {e.retry_after} ثانية")
-            await asyncio.sleep(e.retry_after)
-            return await Helpers.safe_send_message(bot, chat_id, text, **kwargs)
         except Exception as e:
-            logger.error(f"خطأ غير متوقع في إرسال الرسالة: {e}")
-        return False
+            logger.warning(f"فشل ارسال رسالة للمستخدم {chat_id}: {e}")
+            return False
 
 helpers = Helpers()
 
@@ -888,6 +640,7 @@ class Keyboards:
         """لوحة المفاتيح الرئيسية للمستخدم"""
         user = db.get_user(user_id)
         
+        # بناء القائمة الرئيسية
         keyboard = [
             [
                 InlineKeyboardButton("💰 تجميع النقاط", callback_data="collect_points"),
@@ -905,10 +658,7 @@ class Keyboards:
                 InlineKeyboardButton("🆘 الدعم الفني", url=f"https://t.me/{db.settings['support_username']}"),
                 InlineKeyboardButton("📢 قناة البوت", url=db.settings["channel_link"])
             ],
-            [
-                InlineKeyboardButton("🔄 تحديث", callback_data="refresh"),
-                InlineKeyboardButton("ℹ️ معلومات", callback_data="info")
-            ]
+            [InlineKeyboardButton("🔄 تحديث", callback_data="refresh")]
         ]
         
         # إضافة زر لوحة التحكم للمديرين
@@ -928,15 +678,11 @@ class Keyboards:
             ],
             [
                 InlineKeyboardButton("📁 اضافة ملف ارقام", callback_data="admin_add_numbers"),
-                InlineKeyboardButton("🗑 حذف ملف ارقام", callback_data="admin_delete_numbers")
-            ],
-            [
-                InlineKeyboardButton("📋 عرض ملفات الارقام", callback_data="admin_view_files"),
                 InlineKeyboardButton("📞 احصائيات الارقام", callback_data="admin_numbers_stats")
             ],
             [
-                InlineKeyboardButton("👤 اضافة حساب دعم", callback_data="admin_add_support"),
-                InlineKeyboardButton("🔗 اضافة رابط قناة", callback_data="admin_add_channel")
+                InlineKeyboardButton("👤 تغيير حساب الدعم", callback_data="admin_add_support"),
+                InlineKeyboardButton("🔗 تغيير رابط القناة", callback_data="admin_add_channel")
             ],
             [
                 InlineKeyboardButton("🚫 حظر مستخدم", callback_data="admin_ban"),
@@ -948,25 +694,13 @@ class Keyboards:
             ],
             [
                 InlineKeyboardButton("📢 اضافة قناة اجبارية", callback_data="admin_add_mandatory"),
-                InlineKeyboardButton("🗑 حذف قناة اجبارية", callback_data="admin_delete_mandatory")
+                InlineKeyboardButton("📋 عرض القنوات الاجبارية", callback_data="admin_view_mandatory")
             ],
             [
-                InlineKeyboardButton("📋 عرض القنوات الاجبارية", callback_data="admin_view_mandatory"),
-                InlineKeyboardButton("✏️ تغيير رسالة الترحيب", callback_data="admin_change_welcome")
+                InlineKeyboardButton("✏️ تغيير رسالة الترحيب", callback_data="admin_change_welcome"),
+                InlineKeyboardButton("📨 رسالة جماعية", callback_data="admin_broadcast")
             ],
-            [
-                InlineKeyboardButton("📨 رسالة جماعية", callback_data="admin_broadcast"),
-                InlineKeyboardButton("🔄 التحكم بالتمويل", callback_data="admin_financing_control")
-            ],
-            [
-                InlineKeyboardButton("💾 نسخة احتياطية", callback_data="admin_backup"),
-                InlineKeyboardButton("🔄 استعادة نسخة", callback_data="admin_restore")
-            ],
-            [
-                InlineKeyboardButton("📋 سجلات البوت", callback_data="admin_logs"),
-                InlineKeyboardButton("⚙️ اعدادات متقدمة", callback_data="admin_settings")
-            ],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")]
+            [InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data="back_to_main")]
         ]
         return InlineKeyboardMarkup(keyboard)
     
@@ -983,38 +717,6 @@ class Keyboards:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")]
         ])
-    
-    @staticmethod
-    def confirmation_buttons(action: str, item_id: str = None) -> InlineKeyboardMarkup:
-        """أزرار تأكيد"""
-        callback_data = f"confirm_{action}"
-        if item_id:
-            callback_data += f"_{item_id}"
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ نعم", callback_data=callback_data),
-                InlineKeyboardButton("❌ لا", callback_data="cancel")
-            ]
-        ]
-        return InlineKeyboardMarkup(keyboard)
-    
-    @staticmethod
-    def financing_control(finance_id: str) -> InlineKeyboardMarkup:
-        """التحكم في عملية تمويل"""
-        keyboard = [
-            [
-                InlineKeyboardButton("⏸ ايقاف مؤقت", callback_data=f"finance_pause_{finance_id}"),
-                InlineKeyboardButton("▶️ استئناف", callback_data=f"finance_resume_{finance_id}")
-            ],
-            [
-                InlineKeyboardButton("⏹ ايقاف نهائي", callback_data=f"finance_stop_{finance_id}"),
-                InlineKeyboardButton("🔄 اعادة المحاولة", callback_data=f"finance_retry_{finance_id}")
-            ],
-            [InlineKeyboardButton("📊 تحديث", callback_data=f"finance_refresh_{finance_id}")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="admin_financing_control")]
-        ]
-        return InlineKeyboardMarkup(keyboard)
 
 # ==================== معالج الاشتراك الإجباري ====================
 
@@ -1023,10 +725,9 @@ class MandatoryCheck:
     
     @staticmethod
     async def check_and_handle(user_id: int, context: ContextTypes.DEFAULT_TYPE, 
-                              update: Update = None) -> bool:
+                              update: Update = None, query=None) -> bool:
         """التحقق ومعالجة الاشتراك الإجباري"""
         
-        # المديرين مستثنون
         if user_id in ADMIN_IDS:
             return True
         
@@ -1041,7 +742,6 @@ class MandatoryCheck:
             
             text += "✅ بعد الاشتراك اضغط على زر التحقق"
             
-            # إنشاء أزرار القنوات
             keyboard = []
             for channel in not_joined:
                 keyboard.append([InlineKeyboardButton(
@@ -1056,19 +756,18 @@ class MandatoryCheck:
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            if update:
-                if update.callback_query:
-                    await update.callback_query.edit_message_text(
-                        text,
-                        reply_markup=reply_markup,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                else:
-                    await update.message.reply_text(
-                        text,
-                        reply_markup=reply_markup,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
+            if query:
+                await query.edit_message_text(
+                    text,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            elif update:
+                await update.message.reply_text(
+                    text,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN
+                )
             else:
                 await context.bot.send_message(
                     chat_id=user_id,
@@ -1093,8 +792,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     # التحقق من الحظر
     if db.is_banned(user_id):
         await update.message.reply_text(
-            "⛔️ **عذراً، أنت محظور من استخدام البوت**\n\n"
-            "للتواصل مع الدعم الفني: @support",
+            "⛔️ **عذراً، أنت محظور من استخدام البوت**",
             parse_mode=ParseMode.MARKDOWN
         )
         return States.MAIN_MENU.value
@@ -1104,14 +802,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if args and len(args) > 0:
         referral_code = args[0]
         
-        # البحث عن المستخدم الداعي
         for uid, u_data in db.users.items():
             if u_data.get("referral_code") == referral_code and str(uid) != str(user_id):
                 referrer_id = int(uid)
                 
-                # معالجة الدعوة
                 if db.process_referral(referrer_id, user_id):
-                    # إشعار الداعي
                     await helpers.safe_send_message(
                         context.bot,
                         referrer_id,
@@ -1127,12 +822,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db.update_user_info(
         user_id,
         username=user.username,
-        first_name=user.first_name,
-        last_name=user.last_name
+        first_name=user.first_name
     )
     
+    await db.save_all()
+    
     # التحقق من الاشتراك الإجباري
-    if not await MandatoryCheck.check_and_handle(user_id, context, update):
+    if not await MandatoryCheck.check_and_handle(user_id, context, update=update):
         return States.MAIN_MENU.value
     
     # رسالة الترحيب
@@ -1141,8 +837,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         f"👤 **مرحباً {helpers.escape_markdown(user.first_name)}**\n"
         f"🆔 **ايديك:** `{user_id}`\n"
         f"⭐️ **نقاطك:** {user_data['points']}\n"
-        f"👥 **عدد من دعوتهم:** {user_data['referrals']}\n\n"
-        f"📌 استخدم الأزرار أدناه للتنقل"
+        f"👥 **عدد من دعوتهم:** {user_data['referrals']}"
     )
     
     await update.message.reply_text(
@@ -1150,10 +845,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         reply_markup=Keyboards.main_menu(user_id),
         parse_mode=ParseMode.MARKDOWN
     )
-    
-    # تحديث الإحصائيات
-    db.update_stats("/start")
-    await db.save_all()
     
     return States.MAIN_MENU.value
 
@@ -1185,21 +876,17 @@ async def check_subscription_callback(update: Update, context: ContextTypes.DEFA
         )
     else:
         text = "❌ **لم تشترك في جميع القنوات بعد**\n\n"
-        
         for channel in not_joined:
             text += f"📢 {channel['name']}\n"
             text += f"🔗 [اضغط للاشتراك]({channel['link']})\n\n"
-        
         text += "✅ بعد الاشتراك اضغط على زر التحقق مرة اخرى"
         
-        # إعادة إنشاء الأزرار
         keyboard = []
         for channel in not_joined:
             keyboard.append([InlineKeyboardButton(
                 text=f"📢 {channel['name']}",
                 url=channel["link"]
             )])
-        
         keyboard.append([InlineKeyboardButton(
             text="✅ تحقق من الاشتراك",
             callback_data="check_subscription"
@@ -1226,13 +913,13 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
     logger.info(f"زر مستخدم: {data} من {user_id}")
     
     # التحقق من الحظر
-    if db.is_banned(user_id):
+    if db.is_banned(user_id) and data != "check_subscription":
         await query.edit_message_text("⛔️ أنت محظور من استخدام البوت")
         return States.MAIN_MENU.value
     
-    # التحقق من الاشتراك الإجباري (للمستخدمين العاديين)
+    # التحقق من الاشتراك الإجباري
     if user_id not in ADMIN_IDS and data not in ["check_subscription", "back_to_main"]:
-        if not await MandatoryCheck.check_and_handle(user_id, context, update):
+        if not await MandatoryCheck.check_and_handle(user_id, context, query=query):
             return States.MAIN_MENU.value
     
     # ========== تجميع النقاط ==========
@@ -1240,6 +927,9 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
         user_data = db.get_user(user_id)
         bot_info = await context.bot.get_me()
         referral_link = db.get_referral_link(user_id, bot_info.username)
+        
+        # الحصول على أفضل الداعين
+        top_referrers = db.get_top_referrers(3)
         
         text = (
             "💰 **تجميع النقاط**\n\n"
@@ -1250,24 +940,30 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
             f"🎁 **مكافأة كل دعوة:** {db.settings['invite_reward']} نقطة\n\n"
             f"🔗 **رابط الدعوة الخاص بك:**\n"
             f"`{referral_link}`\n\n"
-            "✨ كلما زاد عدد الدعوات زاد رصيدك"
         )
         
-        # أزرار المشاركة
+        # إضافة أفضل الداعين
+        if top_referrers:
+            text += "🏅 **أفضل الداعين:**\n"
+            for i, ref in enumerate(top_referrers, 1):
+                user_info = db.users.get(ref["user_id"], {})
+                name = user_info.get("first_name", "مستخدم")[:20]
+                text += f"{i}. {name} - `{ref['user_id']}` - {ref['count']} دعوة\n"
+        
         share_keyboard = [
             [
-                InlineKeyboardButton("📱 مشاركة", switch_inline_query="اشترك في بوت التمويل 🚀"),
+                InlineKeyboardButton("📱 مشاركة", switch_inline_query=f"انضم الي في بوت التمويل 🚀\n{referral_link}"),
                 InlineKeyboardButton("📋 نسخ الرابط", callback_data="copy_link")
             ],
             [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")]
         ]
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=InlineKeyboardMarkup(share_keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
-        db.update_stats("collect_points")
     
     # ========== نسخ الرابط ==========
     elif data == "copy_link":
@@ -1290,12 +986,14 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
             f"💵 **سعر العضو الواحد:** {member_price} نقطة\n"
             f"📊 **الحد الأدنى:** {min_finance} عضو\n"
             f"📊 **الحد الأقصى:** {max_finance} عضو\n\n"
+            f"📞 **الارقام المتاحة:** {len(db.numbers['numbers'])}\n\n"
             "📝 **ارسل الآن عدد الاعضاء الذي تريد تمويلهم**\n"
             "مثال: `100`\n\n"
             "⚠️ **ملاحظة مهمة:** يجب ان يكون البوت ادمن في قناتك"
         )
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=Keyboards.cancel_button(),
             parse_mode=ParseMode.MARKDOWN
@@ -1312,7 +1010,7 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
             text = "📊 **لا يوجد لديك تمويلات حالية**\n\nاستخدم زر تمويل مشتركين للبدء"
         else:
             text = "📊 **تمويلاتك**\n\n"
-            for finance in finances[-5:]:  # آخر 5 تمويلات
+            for finance in finances[-5:]:
                 status_emoji = {
                     "pending": "⏳",
                     "processing": "🔄",
@@ -1321,28 +1019,24 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 }.get(finance["status"], "⏳")
                 
                 text += f"{status_emoji} **{finance['id'][:8]}...**\n"
-                text += f"   📍 القناة: {finance['channel_link'][:30]}...\n"
                 text += f"   👥 التقدم: {finance['added_members']}/{finance['total_members']}\n"
                 text += f"   💰 التكلفة: {finance['cost']} نقطة\n"
                 text += f"   📅 التاريخ: {finance['created_at'][:10]}\n\n"
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=Keyboards.back_button(),
             parse_mode=ParseMode.MARKDOWN
         )
-        db.update_stats("my_financing")
     
     # ========== احصائياتي ==========
     elif data == "my_stats":
         user_data = db.get_user(user_id)
         
-        # حساب نسبة النجاح
-        success_rate = 0
-        if user_data['financing_count'] > 0:
-            completed = sum(1 for f in db.financing.values() 
-                          if f["user_id"] == str(user_id) and f["status"] == "completed")
-            success_rate = (completed / user_data['financing_count']) * 100
+        completed = sum(1 for f in db.financing.values() 
+                       if f["user_id"] == str(user_id) and f["status"] == "completed")
+        success_rate = (completed / user_data['financing_count'] * 100) if user_data['financing_count'] > 0 else 0
         
         text = (
             "📈 **احصائياتك الشخصية**\n\n"
@@ -1357,12 +1051,12 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
             f"📅 **تاريخ الانضمام:** {user_data['joined_date'][:10]}"
         )
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=Keyboards.back_button(),
             parse_mode=ParseMode.MARKDOWN
         )
-        db.update_stats("my_stats")
     
     # ========== المكافأة اليومية ==========
     elif data == "daily_bonus":
@@ -1383,26 +1077,29 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 return States.MAIN_MENU.value
         
-        # إضافة المكافأة
         bonus = db.settings["daily_bonus"]
-        db.add_points(user_id, bonus, "مكافأة يومية")
+        db.add_points(user_id, bonus)
         db.update_user_info(user_id, last_daily=now.isoformat())
+        await db.save_all()
         
         await query.answer(f"✅ تم اضافة {bonus} نقطة كمكافأة يومية", show_alert=True)
         
         # تحديث العرض
         user_data = db.get_user(user_id)
-        await query.edit_message_text(
+        welcome_text = (
             f"{db.settings['welcome_message']}\n\n"
             f"👤 **مرحباً {query.from_user.first_name}**\n"
             f"🆔 **ايديك:** `{user_id}`\n"
             f"⭐️ **نقاطك:** {user_data['points']}\n"
-            f"👥 **عدد من دعوتهم:** {user_data['referrals']}",
+            f"👥 **عدد من دعوتهم:** {user_data['referrals']}"
+        )
+        
+        await helpers.safe_edit_message(
+            query,
+            welcome_text,
             reply_markup=Keyboards.main_menu(user_id),
             parse_mode=ParseMode.MARKDOWN
         )
-        
-        db.update_stats("daily_bonus")
     
     # ========== دعوة صديق ==========
     elif data == "invite_friend":
@@ -1410,46 +1107,35 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
         user_data = db.get_user(user_id)
         referral_link = db.get_referral_link(user_id, bot_info.username)
         
+        # الحصول على أفضل الداعين
+        top_referrers = db.get_top_referrers(3)
+        
         text = (
             "👥 **دعوة صديق**\n\n"
             "🎁 شارك الرابط التالي مع اصدقائك\n"
             "ستحصل على مكافأة عند كل صديق ينضم\n\n"
             f"💰 **المكافأة:** {db.settings['invite_reward']} نقطة لكل صديق\n"
+            f"👥 **عدد دعواتك:** {user_data['referrals']}\n"
             f"🔗 **رابط الدعوة:**\n`{referral_link}`\n\n"
-            "📱 اضغط على الزر لمشاركة الرابط"
         )
+        
+        # إضافة أفضل الداعين
+        if top_referrers:
+            text += "🏅 **أفضل الداعين:**\n"
+            for i, ref in enumerate(top_referrers, 1):
+                user_info = db.users.get(ref["user_id"], {})
+                name = user_info.get("first_name", "مستخدم")[:20]
+                text += f"{i}. `{ref['user_id']}` - {ref['count']} دعوة\n"
         
         share_keyboard = [
             [InlineKeyboardButton("📱 مشاركة", switch_inline_query=f"انضم الي في بوت التمويل 🚀\n{referral_link}")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")]
         ]
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=InlineKeyboardMarkup(share_keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    # ========== معلومات ==========
-    elif data == "info":
-        stats = db.get_bot_stats()
-        
-        text = (
-            "ℹ️ **معلومات البوت**\n\n"
-            f"👥 **عدد المستخدمين:** {stats['total_users']}\n"
-            f"⭐️ **اجمالي النقاط:** {stats['total_points']}\n"
-            f"🚀 **اجمالي التمويلات:** {stats['total_financing']}\n"
-            f"💸 **اجمالي المنفق:** {stats['total_spent']} نقطة\n"
-            f"👥 **اجمالي الدعوات:** {stats['total_referrals']}\n"
-            f"📞 **الارقام المتاحة:** {stats['numbers']['available']}\n"
-            f"⏱ **مدة التشغيل:** {stats['bot_uptime']}\n"
-            f"📌 **الاصدار:** {stats['version']}\n\n"
-            f"🆘 **للاستفسار:** @{db.settings['support_username']}"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.back_button(),
             parse_mode=ParseMode.MARKDOWN
         )
     
@@ -1464,7 +1150,8 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
             f"👥 **عدد من دعوتهم:** {user_data['referrals']}"
         )
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=Keyboards.main_menu(user_id),
             parse_mode=ParseMode.MARKDOWN
@@ -1481,7 +1168,8 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
             f"👥 **عدد من دعوتهم:** {user_data['referrals']}"
         )
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=Keyboards.main_menu(user_id),
             parse_mode=ParseMode.MARKDOWN
@@ -1490,9 +1178,9 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
     
     # ========== لوحة تحكم المدير ==========
     elif data == "admin_panel" and user_id in ADMIN_IDS:
-        await query.edit_message_text(
-            "⚙️ **لوحة تحكم المدير**\n"
-            "اختر العملية التي تريد تنفيذها",
+        await helpers.safe_edit_message(
+            query,
+            "⚙️ **لوحة تحكم المدير**\nاختر العملية التي تريد تنفيذها",
             reply_markup=Keyboards.admin_panel(),
             parse_mode=ParseMode.MARKDOWN
         )
@@ -1508,7 +1196,8 @@ async def user_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TY
             f"👥 **عدد من دعوتهم:** {user_data['referrals']}"
         )
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=Keyboards.main_menu(user_id),
             parse_mode=ParseMode.MARKDOWN
@@ -1539,18 +1228,20 @@ async def handle_members_count(update: Update, context: ContextTypes.DEFAULT_TYP
         max_count = db.settings["max_financing"]
         
         if count < min_count:
-            await update.message.reply_text(
-                f"❌ الحد الأدنى للتمويل هو {min_count} عضو\n"
-                f"الرجاء ادخال عدد اكبر"
-            )
+            await update.message.reply_text(f"❌ الحد الأدنى هو {min_count} عضو")
             return States.WAITING_FOR_MEMBERS_COUNT.value
         
         if count > max_count:
-            await update.message.reply_text(
-                f"❌ الحد الأقصى للتمويل هو {max_count} عضو\n"
-                f"الرجاء ادخال عدد اقل"
-            )
+            await update.message.reply_text(f"❌ الحد الأقصى هو {max_count} عضو")
             return States.WAITING_FOR_MEMBERS_COUNT.value
+        
+        # التحقق من وجود ارقام كافية
+        if len(db.numbers["numbers"]) < count:
+            await update.message.reply_text(
+                f"❌ لا يوجد ارقام كافية\nالمتوفر: {len(db.numbers['numbers'])} رقم فقط"
+            )
+            context.user_data.clear()
+            return States.MAIN_MENU.value
         
         user_data = db.get_user(user_id)
         member_price = db.settings["member_price"]
@@ -1560,17 +1251,12 @@ async def handle_members_count(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(
                 f"❌ **رصيدك غير كافي**\n\n"
                 f"💰 المطلوب: {total_cost} نقطة\n"
-                f"⭐️ رصيدك: {user_data['points']} نقطة\n"
-                f"📊 العجز: {total_cost - user_data['points']} نقطة\n\n"
-                "يمكنك تجميع المزيد من النقاط عبر:\n"
-                "• دعوة اصدقاء\n"
-                "• المكافأة اليومية",
+                f"⭐️ رصيدك: {user_data['points']} نقطة",
                 parse_mode=ParseMode.MARKDOWN
             )
             context.user_data.clear()
             return States.MAIN_MENU.value
         
-        # حفظ البيانات مؤقتاً
         context.user_data["finance"] = {
             "count": count,
             "cost": total_cost
@@ -1578,14 +1264,11 @@ async def handle_members_count(update: Update, context: ContextTypes.DEFAULT_TYP
         
         await update.message.reply_text(
             f"✅ **تم حساب التكلفة**\n\n"
-            f"👥 عدد الاعضاء: {count}\n"
-            f"💰 التكلفة الاجمالية: {total_cost} نقطة\n"
-            f"⭐️ رصيدك المتبقي: {user_data['points'] - total_cost} نقطة\n\n"
-            "📤 **الآن ارسل رابط قناتك**\n"
-            "⚠️ تأكد ان البوت ادمن في القناة\n\n"
-            "مثال:\n"
-            "`https://t.me/your_channel`\n"
-            "او `@your_channel`",
+            f"👥 العدد: {count}\n"
+            f"💰 التكلفة: {total_cost} نقطة\n"
+            f"⭐️ الرصيد المتبقي: {user_data['points'] - total_cost} نقطة\n\n"
+            f"📤 **ارسل رابط قناتك الآن**\n"
+            f"مثال: `https://t.me/your_channel`",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=Keyboards.cancel_button()
         )
@@ -1593,10 +1276,7 @@ async def handle_members_count(update: Update, context: ContextTypes.DEFAULT_TYP
         return States.WAITING_FOR_CHANNEL_LINK.value
         
     except ValueError:
-        await update.message.reply_text(
-            "❌ الرجاء ادخال رقم صحيح\n"
-            "مثال: 100"
-        )
+        await update.message.reply_text("❌ الرجاء ادخال رقم صحيح")
         return States.WAITING_FOR_MEMBERS_COUNT.value
 
 # ==================== معالج رابط القناة ====================
@@ -1614,44 +1294,27 @@ async def handle_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.clear()
         return States.MAIN_MENU.value
     
-    # التحقق من صحة الرابط
     if not helpers.is_valid_link(link):
         await update.message.reply_text(
             "❌ رابط غير صالح\n"
-            "الرجاء ارسال رابط صحيح مثل:\n"
-            "`https://t.me/your_channel`\n"
-            "او `@your_channel`",
-            parse_mode=ParseMode.MARKDOWN
+            "ارسل رابط مثل: https://t.me/your_channel"
         )
         return States.WAITING_FOR_CHANNEL_LINK.value
     
-    # تنظيف الرابط
     if link.startswith('@'):
         clean_link = link
-    elif 't.me/' in link:
-        clean_link = link
-    else:
+    elif 't.me/' not in link:
         clean_link = f"https://t.me/{link}"
+    else:
+        clean_link = link
     
     finance_data = context.user_data.get("finance")
     if not finance_data:
         await update.message.reply_text("❌ حدث خطأ، الرجاء المحاولة مرة اخرى")
         return States.MAIN_MENU.value
     
-    # التحقق من وجود ارقام كافية
-    numbers_available = len(db.numbers["numbers"])
-    if numbers_available < finance_data["count"]:
-        await update.message.reply_text(
-            f"❌ **لا يوجد ارقام كافية للتمويل**\n\n"
-            f"المطلوب: {finance_data['count']} رقم\n"
-            f"المتوفر: {numbers_available} رقم\n\n"
-            "سيتم اعلامك عند توفر ارقام جديدة",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return States.MAIN_MENU.value
-    
     # خصم النقاط
-    if not db.deduct_points(user_id, finance_data["cost"], f"تمويل {finance_data['count']} عضو"):
+    if not db.deduct_points(user_id, finance_data["cost"]):
         await update.message.reply_text("❌ فشل خصم النقاط")
         return States.MAIN_MENU.value
     
@@ -1665,36 +1328,17 @@ async def handle_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await db.save_all()
     
-    # رسالة تأكيد
     await update.message.reply_text(
         f"✅ **تم بدء التمويل بنجاح**\n\n"
-        f"📊 **معلومات التمويل:**\n"
         f"🆔 المعرف: `{finance_id}`\n"
-        f"👥 عدد الاعضاء: {finance_data['count']}\n"
-        f"💰 التكلفة: {finance_data['cost']} نقطة\n"
-        f"🔗 القناة: {clean_link}\n\n"
-        f"⏳ جاري التمويل...\n"
-        f"سيتم اعلامك عند اضافة كل عضو",
+        f"👥 العدد: {finance_data['count']}\n"
+        f"💰 التكلفة: {finance_data['cost']} نقطة\n\n"
+        f"⏳ جاري التمويل...",
         parse_mode=ParseMode.MARKDOWN
     )
     
-    # إشعار المديرين
-    for admin_id in ADMIN_IDS:
-        await helpers.safe_send_message(
-            context.bot,
-            admin_id,
-            f"🚀 **تمويل جديد**\n\n"
-            f"👤 المستخدم: `{user_id}`\n"
-            f"👤 الاسم: {update.effective_user.first_name}\n"
-            f"🔗 القناة: {clean_link}\n"
-            f"👥 العدد: {finance_data['count']}\n"
-            f"💰 التكلفة: {finance_data['cost']}\n"
-            f"🆔 المعرف: `{finance_id}`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
     # بدء التمويل في الخلفية
-    asyncio.create_task(process_financing_job(context.application, finance_id))
+    asyncio.create_task(process_financing(update.get_bot(), finance_id))
     
     # العودة للقائمة الرئيسية
     user_data = db.get_user(user_id)
@@ -1715,11 +1359,11 @@ async def handle_channel_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.clear()
     return States.MAIN_MENU.value
 
-# ==================== مهمة التمويل في الخلفية ====================
+# ==================== معالج التمويل في الخلفية ====================
 
-async def process_financing_job(app: Application, finance_id: str):
+async def process_financing(bot, finance_id: str):
     """معالجة التمويل في الخلفية"""
-    await asyncio.sleep(2)  # تأخير بسيط
+    await asyncio.sleep(2)
     
     finance = db.financing.get(finance_id)
     if not finance:
@@ -1727,83 +1371,53 @@ async def process_financing_job(app: Application, finance_id: str):
     
     logger.info(f"🚀 بدء تمويل: {finance_id}")
     
-    # تحديث الحالة
-    db.update_financing(finance_id, status="processing", started_at=datetime.now().isoformat())
+    db.update_financing(finance_id, status="processing")
     await db.save_all()
     
     user_id = int(finance["user_id"])
     remaining = finance["total_members"] - finance["added_members"]
     
     for i in range(remaining):
-        # التحقق من حالة التمويل
         current = db.financing.get(finance_id)
-        if not current or current["status"] not in ["processing", "pending"]:
-            logger.info(f"⏸ توقف التمويل {finance_id}")
+        if not current or current["status"] != "processing":
             break
         
-        # الحصول على رقم
         numbers = db.get_available_numbers(1)
         if not numbers:
-            logger.warning(f"⚠️ نفذت الارقام في التمويل {finance_id}")
             await helpers.safe_send_message(
-                app.bot,
+                bot,
                 user_id,
-                "⚠️ **نفذت الارقام المتاحة**\n"
-                "سيتم اكمال التمويل فور توفر ارقام جديدة"
+                "⚠️ نفذت الارقام المتاحة، سيتم اكمال التمويل لاحقاً"
             )
             break
         
         number = numbers[0]
         
-        # محاكاة اضافة العضو (هنا يتم دمج مع Telethon للاضافة الحقيقية)
-        # هذا مجرد محاكاة - يجب اضافة كود Telethon هنا
-        await asyncio.sleep(random.uniform(1, 3))  # محاكاة وقت الاضافة
+        # محاكاة اضافة العضو
+        await asyncio.sleep(random.uniform(1, 2))
         
-        # تحديث التمويل
         result = db.add_financing_member(finance_id, number)
         
-        if result["success"]:
-            # إرسال اشعار للمستخدم
-            if (i + 1) % 5 == 0 or result["completed"]:  # كل 5 اعضاء او عند الاكتمال
-                progress = result["progress"]
-                await helpers.safe_send_message(
-                    app.bot,
-                    user_id,
-                    f"✅ **تم اضافة {i+1} اعضاء**\n"
-                    f"📊 التقدم: {progress}\n"
-                    f"🚀 جاري اكمال التمويل..."
-                )
+        if result["success"] and (i + 1) % 5 == 0:
+            await helpers.safe_send_message(
+                bot,
+                user_id,
+                f"✅ تم اضافة {i+1} عضو\nالتقدم: {result['progress']}"
+            )
         
         await db.save_all()
         
         if result["completed"]:
-            # إرسال اشعار الاكتمال
             await helpers.safe_send_message(
-                app.bot,
+                bot,
                 user_id,
                 f"✅ **اكتمل التمويل بنجاح**\n\n"
-                f"📊 **ملخص التمويل:**\n"
-                f"👥 اجمالي الاعضاء: {finance['total_members']}\n"
-                f"💰 التكلفة: {finance['cost']} نقطة\n"
-                f"🔗 القناة: {finance['channel_link']}\n\n"
-                f"شكراً لاستخدامك البوت 🌟"
+                f"👥 اجمالي الاعضاء: {finance['total_members']}",
+                parse_mode=ParseMode.MARKDOWN
             )
-            
-            # إشعار المديرين
-            for admin_id in ADMIN_IDS:
-                await helpers.safe_send_message(
-                    app.bot,
-                    admin_id,
-                    f"✅ **اكتمال تمويل**\n\n"
-                    f"🆔 المعرف: `{finance_id}`\n"
-                    f"👤 المستخدم: `{user_id}`\n"
-                    f"👥 العدد: {finance['total_members']}"
-                )
-            
-            logger.info(f"✅ اكتمل التمويل: {finance_id}")
             break
     
-    logger.info(f"🏁 انتهاء معالجة التمويل: {finance_id}")
+    logger.info(f"🏁 انتهاء تمويل: {finance_id}")
 
 # ==================== معالج أزرار المدير ====================
 
@@ -1814,7 +1428,6 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     user_id = query.from_user.id
     
-    # التحقق من صلاحية المدير
     if user_id not in ADMIN_IDS:
         await query.edit_message_text("⛔️ هذه الخاصية للمدراء فقط")
         return States.MAIN_MENU.value
@@ -1825,9 +1438,6 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     # ========== احصائيات البوت ==========
     if data == "admin_stats":
         stats = db.get_bot_stats()
-        
-        # تفاصيل إضافية
-        active_financing = len(db.get_active_financing())
         
         text = (
             "📊 **احصائيات البوت**\n\n"
@@ -1846,91 +1456,35 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             f"📞 **الارقام:**\n"
             f"   • متاح: {stats['numbers']['available']}\n"
             f"   • مستخدم: {stats['numbers']['used']}\n"
-            f"   • غير صالح: {stats['numbers']['invalid']}\n"
             f"   • ملفات: {stats['numbers']['files']}\n\n"
             f"📢 **قنوات اجبارية:** {stats['mandatory_channels']}\n"
-            f"👥 **دعوات:** {stats['total_referrals']}\n"
-            f"⏱ **مدة التشغيل:** {stats['bot_uptime']}\n"
-            f"📌 **الاصدار:** {stats['version']}"
+            f"👥 **دعوات:** {stats['total_referrals']}"
         )
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=Keyboards.admin_panel(),
             parse_mode=ParseMode.MARKDOWN
         )
-        db.update_stats("admin_stats")
     
     # ========== اضافة ملف ارقام ==========
     elif data == "admin_add_numbers":
-        text = (
+        await helpers.safe_edit_message(
+            query,
             "📁 **اضافة ملف ارقام**\n\n"
-            "📤 **ارسل ملف txt يحتوي على ارقام تليجرام**\n\n"
-            "📌 **شروط الملف:**\n"
-            "• الصيغة: .txt فقط\n"
-            "• كل رقم في سطر منفصل\n"
-            "• الارقام يجب ان تبدأ بـ 00963 او +963\n\n"
-            "✅ **مثال:**\n"
+            "📤 ارسل ملف txt يحتوي على ارقام تليجرام\n"
+            "كل رقم في سطر منفصل\n"
+            "الارقام يجب ان تبدأ بـ 00963 او +963\n\n"
+            "✅ مثال:\n"
             "00963123456789\n"
-            "+963987654321\n\n"
-            "⚠️ **ملاحظة:** الملفات الكبيرة قد تستغرق وقتاً في المعالجة"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+            "+963987654321",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "add_numbers"
         return States.ADMIN_ADD_NUMBERS.value
-    
-    # ========== حذف ملف ارقام ==========
-    elif data == "admin_delete_numbers":
-        files = db.numbers["files"]
-        
-        if not files:
-            await query.edit_message_text(
-                "❌ **لا يوجد ملفات ارقام**\n\n"
-                "استخدم زر 'اضافة ملف ارقام' لرفع ملفات جديدة",
-                reply_markup=Keyboards.admin_panel()
-            )
-            return States.MAIN_MENU.value
-        
-        keyboard = []
-        for file in files[-10:]:  # آخر 10 ملفات فقط
-            keyboard.append([InlineKeyboardButton(
-                text=f"🗑 {file['name']} ({file['count']} رقم)",
-                callback_data=f"delete_file_{file['name']}"
-            )])
-        
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_to_admin")])
-        
-        await query.edit_message_text(
-            "🗑 **اختر الملف المراد حذفه**",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    # ========== عرض ملفات الارقام ==========
-    elif data == "admin_view_files":
-        files = db.numbers["files"]
-        
-        if not files:
-            text = "📁 **لا يوجد ملفات ارقام**"
-        else:
-            text = "📁 **ملفات الارقام**\n\n"
-            for i, file in enumerate(files[-15:], 1):  # آخر 15 ملف
-                text += f"{i}. **{file['name']}**\n"
-                text += f"   • عدد الارقام: {file['count']}\n"
-                text += f"   • الصالح: {file.get('valid', file['count'])}\n"
-                text += f"   • غير صالح: {file.get('invalid', 0)}\n"
-                text += f"   • التاريخ: {file['added_date'][:10]}\n\n"
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.back_button("back_to_admin"),
-            parse_mode=ParseMode.MARKDOWN
-        )
     
     # ========== احصائيات الارقام ==========
     elif data == "admin_numbers_stats":
@@ -1943,12 +1497,11 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             f"❌ **غير صالح:** {stats['invalid']}\n"
             f"📁 **عدد الملفات:** {stats['files']}\n"
             f"📊 **اجمالي المضاف:** {stats['total_added']}\n"
-            f"📊 **اجمالي المستخدم:** {stats['total_used']}\n\n"
-            f"📈 **نسبة الاستخدام:** "
-            f"{stats['total_used']/stats['total_added']*100 if stats['total_added'] > 0 else 0:.1f}%"
+            f"📊 **اجمالي المستخدم:** {stats['total_used']}"
         )
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=Keyboards.back_button("back_to_admin"),
             parse_mode=ParseMode.MARKDOWN
@@ -1956,18 +1509,13 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # ========== شحن رصيد ==========
     elif data == "admin_add_points":
-        text = (
+        await helpers.safe_edit_message(
+            query,
             "💰 **شحن رصيد مستخدم**\n\n"
-            "📝 **ارسل بيانات الشحن بالتنسيق التالي:**\n"
-            "`ايدي المستخدم المبلغ`\n\n"
-            "✅ **مثال:**\n"
-            "`123456789 100`\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+            "ارسل: `ايدي المستخدم المبلغ`\n"
+            "مثال: `123456789 100`",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "add_points"
@@ -1975,54 +1523,45 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # ========== خصم رصيد ==========
     elif data == "admin_deduct_points":
-        text = (
+        await helpers.safe_edit_message(
+            query,
             "💸 **خصم رصيد مستخدم**\n\n"
-            "📝 **ارسل بيانات الخصم بالتنسيق التالي:**\n"
-            "`ايدي المستخدم المبلغ`\n\n"
-            "✅ **مثال:**\n"
-            "`123456789 50`\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+            "ارسل: `ايدي المستخدم المبلغ`\n"
+            "مثال: `123456789 50`",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "deduct_points"
         return States.ADMIN_DEDUCT_POINTS.value
     
-    # ========== اضافة حساب دعم ==========
+    # ========== تغيير حساب الدعم ==========
     elif data == "admin_add_support":
-        text = (
-            "👤 **تغيير حساب الدعم**\n\n"
-            f"الحساب الحالي: @{db.settings['support_username']}\n\n"
-            "📝 **ارسل اليوزر الجديد:**\n"
-            "مثال: `support_username`\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+        current = db.settings['support_username']
+        await helpers.safe_edit_message(
+            query,
+            f"👤 **تغيير حساب الدعم**\n\n"
+            f"الحالي: @{current}\n\n"
+            "ارسل اليوزر الجديد:\n"
+            "مثال: `support_new`",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "add_support"
         return States.ADMIN_ADD_SUPPORT.value
     
-    # ========== اضافة رابط قناة ==========
+    # ========== تغيير رابط القناة ==========
     elif data == "admin_add_channel":
-        text = (
-            "🔗 **تغيير رابط قناة البوت**\n\n"
-            f"الرابط الحالي: {db.settings['channel_link']}\n\n"
-            "📝 **ارسل الرابط الجديد:**\n"
-            "مثال: `https://t.me/your_channel`\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+        current = db.settings['channel_link']
+        await helpers.safe_edit_message(
+            query,
+            f"🔗 **تغيير رابط القناة**\n\n"
+            f"الحالي: {current}\n\n"
+            "ارسل الرابط الجديد:\n"
+            "مثال: `https://t.me/new_channel`",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "add_channel"
@@ -2030,19 +1569,14 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # ========== حظر مستخدم ==========
     elif data == "admin_ban":
-        text = (
+        await helpers.safe_edit_message(
+            query,
             "🚫 **حظر مستخدم**\n\n"
-            "📝 **ارسل ايدي المستخدم المراد حظره**\n"
-            "يمكنك اضافة سبب بعد الايدي\n\n"
-            "✅ **مثال:**\n"
-            "`123456789`\n"
-            "او `123456789  سبب الحظر`\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+            "ارسل ايدي المستخدم المراد حظره\n"
+            "مثال: `123456789`\n"
+            "او: `123456789 سبب الحظر`",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "ban"
@@ -2050,17 +1584,13 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # ========== رفع حظر ==========
     elif data == "admin_unban":
-        text = (
+        await helpers.safe_edit_message(
+            query,
             "✅ **رفع حظر عن مستخدم**\n\n"
-            "📝 **ارسل ايدي المستخدم المراد رفع الحظر عنه**\n\n"
-            "✅ **مثال:**\n"
-            "`123456789`\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+            "ارسل ايدي المستخدم\n"
+            "مثال: `123456789`",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "unban"
@@ -2068,18 +1598,15 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # ========== تغيير مكافأة الدعوة ==========
     elif data == "admin_change_reward":
-        current = db.settings["invite_reward"]
-        text = (
-            "🎁 **تغيير مكافأة الدعوة**\n\n"
-            f"القيمة الحالية: {current} نقطة\n\n"
-            "📝 **ارسل القيمة الجديدة (رقم فقط):**\n"
-            "✅ مثال: `15`\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+        current = db.settings['invite_reward']
+        await helpers.safe_edit_message(
+            query,
+            f"🎁 **تغيير مكافأة الدعوة**\n\n"
+            f"الحالية: {current} نقطة\n\n"
+            "ارسل القيمة الجديدة:\n"
+            "مثال: `15`",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "change_reward"
@@ -2087,18 +1614,15 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # ========== تغيير سعر العضو ==========
     elif data == "admin_change_price":
-        current = db.settings["member_price"]
-        text = (
-            "💵 **تغيير سعر العضو**\n\n"
-            f"السعر الحالي: {current} نقطة للعضو\n\n"
-            "📝 **ارسل السعر الجديد (رقم فقط):**\n"
-            "✅ مثال: `10`\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+        current = db.settings['member_price']
+        await helpers.safe_edit_message(
+            query,
+            f"💵 **تغيير سعر العضو**\n\n"
+            f"الحالي: {current} نقطة\n\n"
+            "ارسل السعر الجديد:\n"
+            "مثال: `10`",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "change_price"
@@ -2106,49 +1630,18 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # ========== اضافة قناة اجبارية ==========
     elif data == "admin_add_mandatory":
-        text = (
+        await helpers.safe_edit_message(
+            query,
             "📢 **اضافة قناة اجبارية**\n\n"
-            "📝 **ارسل معلومات القناة بهذا التنسيق:**\n"
-            "`الاسم | الرابط | ايدي القناة`\n\n"
-            "✅ **مثال:**\n"
-            "`قناتي | https://t.me/my_channel | -100123456789`\n\n"
-            "⚠️ **ملاحظات:**\n"
-            "• البوت يجب ان يكون مشرف في القناة\n"
-            "• يمكن الحصول على ايدي القناة من @getidsbot\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+            "ارسل: `الاسم | الرابط | ايدي القناة`\n\n"
+            "مثال:\n"
+            "`قناتي | https://t.me/my_channel | -100123456789`",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "add_mandatory"
         return States.ADMIN_ADD_MANDATORY.value
-    
-    # ========== حذف قناة اجبارية ==========
-    elif data == "admin_delete_mandatory":
-        if not db.mandatory:
-            await query.edit_message_text(
-                "❌ لا يوجد قنوات اجبارية",
-                reply_markup=Keyboards.admin_panel()
-            )
-            return States.MAIN_MENU.value
-        
-        keyboard = []
-        for channel in db.mandatory:
-            keyboard.append([InlineKeyboardButton(
-                text=f"🗑 {channel['name']}",
-                callback_data=f"delete_mandatory_{channel['chat_id']}"
-            )])
-        
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_to_admin")])
-        
-        await query.edit_message_text(
-            "🗑 **اختر القناة المراد حذفها**",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
     
     # ========== عرض القنوات الاجبارية ==========
     elif data == "admin_view_mandatory":
@@ -2159,10 +1652,10 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
             for i, channel in enumerate(db.mandatory, 1):
                 text += f"{i}. **{channel['name']}**\n"
                 text += f"   • الرابط: {channel['link']}\n"
-                text += f"   • الايدي: `{channel['chat_id']}`\n"
-                text += f"   • الاضافة: {channel['added_at'][:10]}\n\n"
+                text += f"   • الايدي: `{channel['chat_id']}`\n\n"
         
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             text,
             reply_markup=Keyboards.back_button("back_to_admin"),
             parse_mode=ParseMode.MARKDOWN
@@ -2170,18 +1663,14 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # ========== تغيير رسالة الترحيب ==========
     elif data == "admin_change_welcome":
-        current = db.settings["welcome_message"]
-        text = (
-            "✏️ **تغيير رسالة الترحيب**\n\n"
-            f"**الرسالة الحالية:**\n{current}\n\n"
-            "📝 **ارسل الرسالة الجديدة**\n"
-            "يمكنك استخدام Markdown للتنسيق\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+        current = db.settings['welcome_message']
+        await helpers.safe_edit_message(
+            query,
+            f"✏️ **تغيير رسالة الترحيب**\n\n"
+            f"الحالية:\n{current}\n\n"
+            "ارسل الرسالة الجديدة",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "change_welcome"
@@ -2189,247 +1678,21 @@ async def admin_buttons_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # ========== رسالة جماعية ==========
     elif data == "admin_broadcast":
-        text = (
+        await helpers.safe_edit_message(
+            query,
             "📨 **ارسال رسالة جماعية**\n\n"
-            "📝 **ارسل الرسالة التي تريد ارسالها لجميع المستخدمين**\n\n"
-            "⚠️ **تحذير:** هذه العملية قد تستغرق وقتاً طويلاً حسب عدد المستخدمين\n\n"
-            "❌ يمكنك ارسال 'الغاء' للخروج"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.cancel_button()
+            "ارسل الرسالة التي تريد ارسالها لجميع المستخدمين",
+            reply_markup=Keyboards.cancel_button(),
+            parse_mode=ParseMode.MARKDOWN
         )
         
         context.user_data["admin_action"] = "broadcast"
         return States.ADMIN_BROADCAST.value
     
-    # ========== التحكم بالتمويل ==========
-    elif data == "admin_financing_control":
-        active = db.get_active_financing()
-        
-        if not active:
-            text = "🔄 **لا يوجد تمويلات نشطة حالياً**"
-            await query.edit_message_text(
-                text,
-                reply_markup=Keyboards.back_button("back_to_admin")
-            )
-            return States.MAIN_MENU.value
-        
-        text = "🔄 **التمويلات النشطة**\n\n"
-        keyboard = []
-        
-        for finance in active[:10]:  # آخر 10 تمويلات
-            text += f"🆔 `{finance['id']}`\n"
-            text += f"👤 المستخدم: {finance['user_id']}\n"
-            text += f"👥 التقدم: {finance['added_members']}/{finance['total_members']}\n"
-            text += f"📊 الحالة: {finance['status']}\n\n"
-            
-            keyboard.append([InlineKeyboardButton(
-                text=f"🎮 تحكم: {finance['id'][:8]}...",
-                callback_data=f"finance_control_{finance['id']}"
-            )])
-        
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_to_admin")])
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    # ========== التحكم بتمويل معين ==========
-    elif data.startswith("finance_control_"):
-        finance_id = data.replace("finance_control_", "")
-        finance = db.financing.get(finance_id)
-        
-        if not finance:
-            await query.edit_message_text(
-                "❌ عملية تمويل غير موجودة",
-                reply_markup=Keyboards.back_button("admin_financing_control")
-            )
-            return States.MAIN_MENU.value
-        
-        text = (
-            f"🎮 **التحكم في التمويل**\n\n"
-            f"🆔 **المعرف:** `{finance_id}`\n"
-            f"👤 **المستخدم:** {finance['user_id']}\n"
-            f"🔗 **القناة:** {finance['channel_link'][:30]}...\n"
-            f"👥 **التقدم:** {finance['added_members']}/{finance['total_members']}\n"
-            f"📊 **الحالة:** {finance['status']}\n"
-            f"💰 **التكلفة:** {finance['cost']}\n"
-            f"📅 **البداية:** {finance['created_at'][:16]}"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.financing_control(finance_id),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    # ========== ايقاف تمويل ==========
-    elif data.startswith("finance_stop_"):
-        finance_id = data.replace("finance_stop_", "")
-        db.update_financing(finance_id, status="failed")
-        await db.save_all()
-        
-        await query.edit_message_text(
-            f"✅ تم ايقاف التمويل {finance_id}",
-            reply_markup=Keyboards.back_button("admin_financing_control")
-        )
-    
-    # ========== نسخة احتياطية ==========
-    elif data == "admin_backup":
-        await query.edit_message_text(
-            "🔄 جاري انشاء نسخة احتياطية...",
-            reply_markup=None
-        )
-        
-        backup_path = await db.create_backup()
-        
-        if backup_path:
-            await query.edit_message_text(
-                f"✅ **تم انشاء النسخة الاحتياطية بنجاح**\n\n"
-                f"📁 اسم الملف: `{backup_path.name}`\n"
-                f"📊 الحجم: {backup_path.stat().st_size / 1024:.2f} KB\n"
-                f"📅 التاريخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                reply_markup=Keyboards.back_button("back_to_admin"),
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            await query.edit_message_text(
-                "❌ فشل انشاء النسخة الاحتياطية",
-                reply_markup=Keyboards.back_button("back_to_admin")
-            )
-    
-    # ========== استعادة نسخة ==========
-    elif data == "admin_restore":
-        backups = list(DATA_DIR.glob("backup_*.json"))
-        
-        if not backups:
-            await query.edit_message_text(
-                "❌ لا يوجد نسخ احتياطية",
-                reply_markup=Keyboards.back_button("back_to_admin")
-            )
-            return States.MAIN_MENU.value
-        
-        keyboard = []
-        for backup in sorted(backups, reverse=True)[:10]:
-            size = backup.stat().st_size / 1024
-            date = backup.stem.replace("backup_", "")
-            keyboard.append([InlineKeyboardButton(
-                text=f"🔄 {date} ({size:.1f} KB)",
-                callback_data=f"restore_{backup.name}"
-            )])
-        
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_to_admin")])
-        
-        await query.edit_message_text(
-            "🔄 **اختر النسخة الاحتياطية للاستعادة**\n\n⚠️ استعادة النسخة ستحل محل البيانات الحالية",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    # ========== سجلات البوت ==========
-    elif data == "admin_logs":
-        logs = db.logs[-20:]  # آخر 20 سجل
-        
-        if not logs:
-            text = "📋 **لا يوجد سجلات**"
-        else:
-            text = "📋 **آخر السجلات**\n\n"
-            for log in logs:
-                text += f"• {log['type']}: {log.get('points', '')} - {log.get('reason', '')}\n"
-                text += f"  🕐 {log['timestamp'][:16]}\n\n"
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.back_button("back_to_admin"),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    # ========== اعدادات متقدمة ==========
-    elif data == "admin_settings":
-        text = (
-            "⚙️ **الاعدادات الحالية**\n\n"
-            f"🎁 مكافأة الدعوة: {db.settings['invite_reward']}\n"
-            f"💵 سعر العضو: {db.settings['member_price']}\n"
-            f"🎁 المكافأة اليومية: {db.settings['daily_bonus']}\n"
-            f"📊 الحد الادنى للتمويل: {db.settings['min_financing']}\n"
-            f"📊 الحد الاقصى للتمويل: {db.settings['max_financing']}\n"
-            f"👤 حساب الدعم: @{db.settings['support_username']}\n"
-            f"🔗 قناة البوت: {db.settings['channel_link'][:30]}...\n"
-            f"📌 حالة البوت: {db.settings['bot_status']}\n"
-            f"📌 وضع الصيانة: {'🟢' if not db.settings.get('maintenance_mode') else '🔴'}\n"
-            f"📌 الاصدار: {db.settings['version']}"
-        )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.back_button("back_to_admin"),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    # ========== حذف ملف محدد ==========
-    elif data.startswith("delete_file_"):
-        filename = data.replace("delete_file_", "")
-        
-        if db.delete_file(filename):
-            await query.edit_message_text(
-                f"✅ تم حذف الملف {filename} بنجاح",
-                reply_markup=Keyboards.admin_panel()
-            )
-        else:
-            await query.edit_message_text(
-                f"❌ فشل حذف الملف {filename}",
-                reply_markup=Keyboards.admin_panel()
-            )
-    
-    # ========== حذف قناة اجبارية محددة ==========
-    elif data.startswith("delete_mandatory_"):
-        chat_id = data.replace("delete_mandatory_", "")
-        
-        if db.remove_mandatory_channel(chat_id):
-            await query.edit_message_text(
-                "✅ تم حذف القناة الاجبارية بنجاح",
-                reply_markup=Keyboards.admin_panel()
-            )
-        else:
-            await query.edit_message_text(
-                "❌ فشل حذف القناة",
-                reply_markup=Keyboards.admin_panel()
-            )
-    
-    # ========== استعادة نسخة محددة ==========
-    elif data.startswith("restore_"):
-        filename = data.replace("restore_", "")
-        backup_path = DATA_DIR / filename
-        
-        if backup_path.exists():
-            await query.edit_message_text(
-                "🔄 جاري استعادة النسخة الاحتياطية...",
-                reply_markup=None
-            )
-            
-            if await db.restore_backup(backup_path):
-                await query.edit_message_text(
-                    "✅ تم استعادة النسخة الاحتياطية بنجاح",
-                    reply_markup=Keyboards.admin_panel()
-                )
-            else:
-                await query.edit_message_text(
-                    "❌ فشل استعادة النسخة الاحتياطية",
-                    reply_markup=Keyboards.admin_panel()
-                )
-        else:
-            await query.edit_message_text(
-                "❌ ملف النسخة الاحتياطية غير موجود",
-                reply_markup=Keyboards.admin_panel()
-            )
-    
     # ========== رجوع للوحة التحكم ==========
     elif data == "back_to_admin":
-        await query.edit_message_text(
+        await helpers.safe_edit_message(
+            query,
             "⚙️ **لوحة تحكم المدير**",
             reply_markup=Keyboards.admin_panel(),
             parse_mode=ParseMode.MARKDOWN
@@ -2460,12 +1723,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         try:
             parts = text.split()
             if len(parts) != 2:
-                await update.message.reply_text(
-                    "❌ تنسيق خاطئ\n"
-                    "استخدم: `ايدي المستخدم المبلغ`\n"
-                    "مثال: `123456789 100`",
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                await update.message.reply_text("❌ استخدم: ايدي المستخدم المبلغ")
                 return States.ADMIN_ADD_POINTS.value
             
             target_id = int(parts[0])
@@ -2475,28 +1733,19 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await update.message.reply_text("❌ المبلغ يجب ان يكون اكبر من 0")
                 return States.ADMIN_ADD_POINTS.value
             
-            db.add_points(target_id, points, f"شحن من المدير {user_id}")
+            db.add_points(target_id, points)
             await db.save_all()
             
-            await update.message.reply_text(
-                f"✅ **تم شحن الرصيد بنجاح**\n\n"
-                f"👤 المستخدم: `{target_id}`\n"
-                f"💰 المبلغ: {points} نقطة",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await update.message.reply_text(f"✅ تم اضافة {points} نقطة للمستخدم {target_id}")
             
-            # اعلام المستهدف
             await helpers.safe_send_message(
                 context.bot,
                 target_id,
-                f"💰 **تم شحن رصيدك**\n\n"
-                f"➕ المبلغ: {points} نقطة\n"
-                f"⭐️ رصيدك الجديد: {db.get_user(target_id)['points']}",
-                parse_mode=ParseMode.MARKDOWN
+                f"💰 تم شحن رصيدك ب {points} نقطة"
             )
             
         except ValueError:
-            await update.message.reply_text("❌ الرجاء ادخال ارقام صحيحة")
+            await update.message.reply_text("❌ ارقام غير صحيحة")
             return States.ADMIN_ADD_POINTS.value
     
     # ========== خصم رصيد ==========
@@ -2504,12 +1753,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         try:
             parts = text.split()
             if len(parts) != 2:
-                await update.message.reply_text(
-                    "❌ تنسيق خاطئ\n"
-                    "استخدم: `ايدي المستخدم المبلغ`\n"
-                    "مثال: `123456789 50`",
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                await update.message.reply_text("❌ استخدم: ايدي المستخدم المبلغ")
                 return States.ADMIN_DEDUCT_POINTS.value
             
             target_id = int(parts[0])
@@ -2519,64 +1763,38 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await update.message.reply_text("❌ المبلغ يجب ان يكون اكبر من 0")
                 return States.ADMIN_DEDUCT_POINTS.value
             
-            if db.deduct_points(target_id, points, f"خصم من المدير {user_id}"):
+            if db.deduct_points(target_id, points):
                 await db.save_all()
+                await update.message.reply_text(f"✅ تم خصم {points} نقطة من المستخدم {target_id}")
                 
-                await update.message.reply_text(
-                    f"✅ **تم خصم الرصيد بنجاح**\n\n"
-                    f"👤 المستخدم: `{target_id}`\n"
-                    f"💰 المبلغ: {points} نقطة",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                
-                # اعلام المستهدف
                 await helpers.safe_send_message(
                     context.bot,
                     target_id,
-                    f"💸 **تم خصم من رصيدك**\n\n"
-                    f"➖ المبلغ: {points} نقطة\n"
-                    f"⭐️ رصيدك المتبقي: {db.get_user(target_id)['points']}",
-                    parse_mode=ParseMode.MARKDOWN
+                    f"💸 تم خصم {points} نقطة من رصيدك"
                 )
             else:
                 await update.message.reply_text("❌ رصيد المستخدم غير كافي")
             
         except ValueError:
-            await update.message.reply_text("❌ الرجاء ادخال ارقام صحيحة")
+            await update.message.reply_text("❌ ارقام غير صحيحة")
             return States.ADMIN_DEDUCT_POINTS.value
     
     # ========== اضافة حساب دعم ==========
     elif admin_action == "add_support":
-        username = text.strip()
-        if username.startswith('@'):
-            username = username[1:]
-        
+        username = text.replace('@', '').strip()
         db.settings["support_username"] = username
-        db.settings["updated_at"] = datetime.now().isoformat()
         await db.save_all()
-        
-        await update.message.reply_text(
-            f"✅ **تم تحديث حساب الدعم**\n\n"
-            f"👤 الحساب الجديد: @{username}",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text(f"✅ تم تعيين حساب الدعم: @{username}")
     
     # ========== اضافة رابط قناة ==========
     elif admin_action == "add_channel":
-        link = text.strip()
-        if not helpers.is_valid_link(link):
+        if helpers.is_valid_link(text):
+            db.settings["channel_link"] = text
+            await db.save_all()
+            await update.message.reply_text(f"✅ تم تعيين رابط القناة: {text}")
+        else:
             await update.message.reply_text("❌ رابط غير صالح")
             return States.ADMIN_ADD_CHANNEL.value
-        
-        db.settings["channel_link"] = link
-        db.settings["updated_at"] = datetime.now().isoformat()
-        await db.save_all()
-        
-        await update.message.reply_text(
-            f"✅ **تم تحديث رابط القناة**\n\n"
-            f"🔗 الرابط الجديد: {link}",
-            parse_mode=ParseMode.MARKDOWN
-        )
     
     # ========== حظر مستخدم ==========
     elif admin_action == "ban":
@@ -2589,29 +1807,20 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await update.message.reply_text("❌ لا يمكن حظر مدير")
                 return States.ADMIN_BAN_USER.value
             
-            if db.ban_user(target_id, reason, user_id):
+            if db.ban_user(target_id, reason):
                 await db.save_all()
+                await update.message.reply_text(f"✅ تم حظر المستخدم {target_id}")
                 
-                await update.message.reply_text(
-                    f"✅ **تم حظر المستخدم**\n\n"
-                    f"👤 الايدي: `{target_id}`\n"
-                    f"📝 السبب: {reason}",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                
-                # اعلام المحظور
                 await helpers.safe_send_message(
                     context.bot,
                     target_id,
-                    f"⛔️ **تم حظرك من البوت**\n\n"
-                    f"📝 السبب: {reason}\n"
-                    f"🆘 للاستئناف: @{db.settings['support_username']}"
+                    f"⛔️ تم حظرك من البوت\nالسبب: {reason}"
                 )
             else:
-                await update.message.reply_text("❌ فشل حظر المستخدم")
+                await update.message.reply_text("❌ المستخدم محظور بالفعل")
             
         except ValueError:
-            await update.message.reply_text("❌ ايدي المستخدم غير صحيح")
+            await update.message.reply_text("❌ ايدي غير صحيح")
             return States.ADMIN_BAN_USER.value
     
     # ========== رفع حظر ==========
@@ -2621,24 +1830,18 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             
             if db.unban_user(target_id):
                 await db.save_all()
+                await update.message.reply_text(f"✅ تم رفع الحظر عن المستخدم {target_id}")
                 
-                await update.message.reply_text(
-                    f"✅ **تم رفع الحظر عن المستخدم**\n\n"
-                    f"👤 الايدي: `{target_id}`",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                
-                # اعلام المستخدم
                 await helpers.safe_send_message(
                     context.bot,
                     target_id,
-                    "✅ **تم رفع الحظر عنك**\nيمكنك استخدام البوت مرة اخرى"
+                    "✅ تم رفع الحظر عنك، يمكنك استخدام البوت مرة اخرى"
                 )
             else:
                 await update.message.reply_text("❌ المستخدم غير موجود في قائمة المحظورين")
             
         except ValueError:
-            await update.message.reply_text("❌ ايدي المستخدم غير صحيح")
+            await update.message.reply_text("❌ ايدي غير صحيح")
             return States.ADMIN_UNBAN_USER.value
     
     # ========== تغيير مكافأة الدعوة ==========
@@ -2650,17 +1853,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 return States.ADMIN_CHANGE_REWARD.value
             
             db.settings["invite_reward"] = reward
-            db.settings["updated_at"] = datetime.now().isoformat()
             await db.save_all()
-            
-            await update.message.reply_text(
-                f"✅ **تم تحديث مكافأة الدعوة**\n\n"
-                f"🎁 القيمة الجديدة: {reward} نقطة",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await update.message.reply_text(f"✅ تم تغيير مكافأة الدعوة الى {reward} نقطة")
             
         except ValueError:
-            await update.message.reply_text("❌ الرجاء ادخال رقم صحيح")
+            await update.message.reply_text("❌ رقم غير صحيح")
             return States.ADMIN_CHANGE_REWARD.value
     
     # ========== تغيير سعر العضو ==========
@@ -2672,17 +1869,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 return States.ADMIN_CHANGE_PRICE.value
             
             db.settings["member_price"] = price
-            db.settings["updated_at"] = datetime.now().isoformat()
             await db.save_all()
-            
-            await update.message.reply_text(
-                f"✅ **تم تحديث سعر العضو**\n\n"
-                f"💵 السعر الجديد: {price} نقطة للعضو",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await update.message.reply_text(f"✅ تم تغيير سعر العضو الى {price} نقطة")
             
         except ValueError:
-            await update.message.reply_text("❌ الرجاء ادخال رقم صحيح")
+            await update.message.reply_text("❌ رقم غير صحيح")
             return States.ADMIN_CHANGE_PRICE.value
     
     # ========== اضافة قناة اجبارية ==========
@@ -2690,50 +1881,19 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         try:
             parts = [p.strip() for p in text.split('|')]
             if len(parts) != 3:
-                await update.message.reply_text(
-                    "❌ تنسيق خاطئ\n"
-                    "استخدم: `الاسم | الرابط | ايدي القناة`",
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                await update.message.reply_text("❌ استخدم: الاسم | الرابط | الايدي")
                 return States.ADMIN_ADD_MANDATORY.value
             
             name, link, chat_id = parts
             
-            # التحقق من صحة الرابط
             if not helpers.is_valid_link(link):
-                await update.message.reply_text("❌ رابط القناة غير صالح")
+                await update.message.reply_text("❌ رابط غير صالح")
                 return States.ADMIN_ADD_MANDATORY.value
             
-            # محاولة التحقق من القناة
-            try:
-                if str(chat_id).lstrip('-').isdigit():
-                    chat_id_int = int(chat_id)
-                else:
-                    chat_id_int = chat_id
-                
-                chat = await context.bot.get_chat(chat_id_int)
-                await context.bot.get_chat_member(chat_id_int, context.bot.id)
-                
-            except Exception as e:
-                await update.message.reply_text(
-                    f"❌ **خطأ في التحقق من القناة**\n\n"
-                    f"تأكد من:\n"
-                    f"• ان البوت مشرف في القناة\n"
-                    f"• صحة ايدي القناة\n\n"
-                    f"الخطأ: {str(e)[:100]}"
-                )
-                return States.ADMIN_ADD_MANDATORY.value
-            
-            db.add_mandatory_channel(name, link, str(chat_id))
+            db.add_mandatory_channel(name, link, chat_id)
             await db.save_all()
             
-            await update.message.reply_text(
-                f"✅ **تم اضافة القناة الاجبارية**\n\n"
-                f"📢 الاسم: {name}\n"
-                f"🔗 الرابط: {link}\n"
-                f"🆔 الايدي: `{chat_id}`",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await update.message.reply_text(f"✅ تم اضافة القناة: {name}")
             
         except Exception as e:
             await update.message.reply_text(f"❌ خطأ: {str(e)}")
@@ -2742,20 +1902,12 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # ========== تغيير رسالة الترحيب ==========
     elif admin_action == "change_welcome":
         db.settings["welcome_message"] = text
-        db.settings["updated_at"] = datetime.now().isoformat()
         await db.save_all()
-        
-        await update.message.reply_text(
-            "✅ **تم تحديث رسالة الترحيب**",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("✅ تم تغيير رسالة الترحيب")
     
     # ========== رسالة جماعية ==========
     elif admin_action == "broadcast":
-        await update.message.reply_text(
-            "🔄 جاري ارسال الرسالة الى جميع المستخدمين...\n"
-            "قد تستغرق هذه العملية بعض الوقت"
-        )
+        await update.message.reply_text("🔄 جاري ارسال الرسالة...")
         
         success = 0
         failed = 0
@@ -2768,19 +1920,17 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     parse_mode=ParseMode.MARKDOWN
                 )
                 success += 1
-                await asyncio.sleep(0.05)  # تجنب الـ Flood wait
-            except Exception as e:
+                await asyncio.sleep(0.05)
+            except:
                 failed += 1
-                logger.warning(f"فشل ارسال رسالة للمستخدم {uid}: {e}")
         
         await update.message.reply_text(
-            f"📨 **نتيجة الارسال الجماعي**\n\n"
+            f"📨 **نتيجة الارسال**\n\n"
             f"✅ نجح: {success}\n"
             f"❌ فشل: {failed}",
             parse_mode=ParseMode.MARKDOWN
         )
     
-    # العودة للوحة التحكم
     await update.message.reply_text(
         "⚙️ لوحة تحكم المدير",
         reply_markup=Keyboards.admin_panel()
@@ -2795,7 +1945,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """معالج استلام الملفات"""
     user_id = update.effective_user.id
     
-    # التحقق من صلاحية المدير
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("❌ هذه الخاصية للمدراء فقط")
         return States.MAIN_MENU.value
@@ -2808,66 +1957,39 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     document = update.message.document
     
-    # التحقق من صيغة الملف
     if not document.file_name.endswith('.txt'):
-        await update.message.reply_text(
-            "❌ فقط ملفات txt مسموحة\n"
-            "الرجاء ارسال ملف بصيغة .txt"
-        )
+        await update.message.reply_text("❌ فقط ملفات txt مسموحة")
         return States.ADMIN_ADD_NUMBERS.value
     
-    # ارسال رسالة انتظار
-    wait_msg = await update.message.reply_text(
-        "🔄 جاري معالجة الملف...\n"
-        "الرجاء الانتظار"
-    )
+    wait_msg = await update.message.reply_text("🔄 جاري معالجة الملف...")
     
     try:
-        # تحميل الملف
         file = await context.bot.get_file(document.file_id)
         file_content = await file.download_as_bytearray()
         
-        # قراءة المحتوى
         content = file_content.decode('utf-8')
-        lines = content.split('\n')
+        lines = [line.strip() for line in content.split('\n') if line.strip()]
         
-        # تنظيف ومعالجة الارقام
-        numbers = []
-        for line in lines:
-            line = line.strip()
-            if line and not line.startswith('#'):  # تجاهل التعليقات
-                numbers.append(line)
-        
-        if not numbers:
+        if not lines:
             await wait_msg.edit_text("❌ الملف فارغ")
             return States.ADMIN_ADD_NUMBERS.value
         
-        # اضافة الارقام
-        file_info = db.add_numbers_file(document.file_name, numbers)
+        file_info = db.add_numbers_file(document.file_name, lines)
         await db.save_all()
         
-        # رسالة النجاح
         text = (
-            "✅ **تم رفع الملف بنجاح**\n\n"
-            f"📁 **اسم الملف:** {document.file_name}\n"
-            f"📊 **اجمالي الارقام:** {file_info['count']}\n"
-            f"✅ **الارقام الصالحة:** {file_info['valid']}\n"
-            f"❌ **الارقام غير الصالحة:** {file_info['invalid']}\n\n"
-            f"📞 **الارقام المتاحة الآن:** {len(db.numbers['numbers'])}"
+            f"✅ **تم رفع الملف بنجاح**\n\n"
+            f"📁 الملف: {document.file_name}\n"
+            f"✅ الصالح: {file_info['valid']}\n"
+            f"❌ غير الصالح: {file_info['invalid']}\n"
+            f"📞 المتاح الآن: {len(db.numbers['numbers'])}"
         )
         
         await wait_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
         
-    except UnicodeDecodeError:
-        await wait_msg.edit_text(
-            "❌ **خطأ في ترميز الملف**\n\n"
-            "تأكد من ان الملف بترميز UTF-8",
-            parse_mode=ParseMode.MARKDOWN
-        )
     except Exception as e:
-        await wait_msg.edit_text(f"❌ خطأ في قراءة الملف: {str(e)[:100]}")
+        await wait_msg.edit_text(f"❌ خطأ: {str(e)}")
     
-    # العودة للوحة التحكم
     await update.message.reply_text(
         "⚙️ لوحة تحكم المدير",
         reply_markup=Keyboards.admin_panel()
@@ -2882,22 +2004,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """معالج النصوص العام"""
     user_id = update.effective_user.id
     
-    # التحقق من الحظر
     if db.is_banned(user_id):
         await update.message.reply_text("⛔️ أنت محظور من استخدام البوت")
         return States.MAIN_MENU.value
     
-    # التحقق من حالة المستخدم الحالية
     current_state = context.user_data.get("state", States.MAIN_MENU.value)
     
-    # معالجة حسب الحالة
     if current_state == States.WAITING_FOR_MEMBERS_COUNT.value:
         return await handle_members_count(update, context)
     
     elif current_state == States.WAITING_FOR_CHANNEL_LINK.value:
         return await handle_channel_link(update, context)
     
-    # معالجة نصوص المديرين
     if user_id in ADMIN_IDS and current_state in [
         States.ADMIN_ADD_POINTS.value,
         States.ADMIN_DEDUCT_POINTS.value,
@@ -2913,7 +2031,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ]:
         return await handle_admin_text(update, context)
     
-    # رسالة افتراضية
     await update.message.reply_text(
         "❌ امر غير معروف\n"
         "استخدم /start للعودة للقائمة الرئيسية"
@@ -2924,124 +2041,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ==================== معالج الاخطاء ====================
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """معالج الاخطاء الشامل"""
+    """معالج الاخطاء"""
     try:
         error = context.error
         tb = traceback.format_exc()
         
         logger.error(f"❌ خطأ: {error}\n{tb}")
         
-        # حفظ الخطأ في ملف
         error_log = LOGS_DIR / f"error_{datetime.now().strftime('%Y%m%d')}.log"
         async with aiofiles.open(error_log, 'a', encoding='utf-8') as f:
             await f.write(f"{datetime.now().isoformat()}\n")
-            await f.write(f"Update: {update}\n")
             await f.write(f"Error: {error}\n")
             await f.write(f"Traceback: {tb}\n")
             await f.write("-" * 50 + "\n")
         
-        # ابلاغ المديرين
-        for admin_id in ADMIN_IDS:
-            try:
-                error_msg = f"⚠️ **خطأ في البوت**\n\n`{str(error)[:200]}`"
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=error_msg,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            except:
-                pass
-        
-        # ابلاغ المستخدم
         if update and update.effective_message:
             await update.effective_message.reply_text(
-                "❌ عذراً، حدث خطأ غير متوقع\n"
-                "تم ابلاغ المطورين وسيتم حل المشكلة قريباً"
+                "❌ حدث خطأ غير متوقع، تم ابلاغ المطورين"
             )
             
     except Exception as e:
-        logger.critical(f"خطأ في معالج الاخطاء نفسه: {e}")
+        logger.critical(f"خطأ في معالج الاخطاء: {e}")
 
 # ==================== اعداد اوامر البوت ====================
 
-async def set_bot_commands(application: Application) -> None:
-    """اعداد اوامر البوت"""
+async def post_init(application: Application) -> None:
+    """بعد تهيئة البوت"""
     commands = [
         BotCommand("start", "بدء استخدام البوت"),
-        BotCommand("help", "مساعدة"),
-        BotCommand("points", "عرض نقاطي"),
-        BotCommand("finance", "تمويل مشتركين"),
-        BotCommand("stats", "احصائياتي"),
     ]
-    
     await application.bot.set_my_commands(commands)
-
-# ==================== وظائف دورية ====================
-
-async def daily_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
-    """وظيفة التنظيف اليومية"""
-    logger.info("🧹 بدء عملية التنظيف اليومية")
-    
-    # حذف الملفات المؤقتة القديمة
-    now = datetime.now()
-    for temp_file in TEMP_DIR.glob("*"):
-        try:
-            mtime = datetime.fromtimestamp(temp_file.stat().st_mtime)
-            if (now - mtime) > timedelta(days=7):
-                temp_file.unlink()
-                logger.info(f"🗑 تم حذف {temp_file.name}")
-        except:
-            pass
-    
-    # حذف سجلات الاخطاء القديمة
-    for log_file in LOGS_DIR.glob("error_*.log"):
-        try:
-            mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
-            if (now - mtime) > timedelta(days=30):
-                log_file.unlink()
-                logger.info(f"🗑 تم حذف {log_file.name}")
-        except:
-            pass
-    
-    logger.info("✅ اكتملت عملية التنظيف اليومية")
-
-async def backup_job(context: ContextTypes.DEFAULT_TYPE):
-    """وظيفة النسخ الاحتياطي الدورية"""
-    logger.info("💾 بدء النسخ الاحتياطي الدوري")
-    backup_path = await db.create_backup()
-    if backup_path:
-        logger.info(f"✅ تم انشاء نسخة احتياطية: {backup_path.name}")
-    else:
-        logger.error("❌ فشل انشاء النسخة الاحتياطية")
+    logger.info("✅ تم اعداد اوامر البوت")
 
 # ==================== الدالة الرئيسية ====================
 
 def main() -> None:
-    """الدالة الرئيسية لتشغيل البوت"""
+    """الدالة الرئيسية"""
     
     print(f"{Fore.CYAN}{'='*60}{Fore.RESET}")
-    print(f"{Fore.GREEN}🤖 بوت التمويل المتكامل{Fore.RESET}")
-    print(f"{Fore.YELLOW}📌 الاصدار: 2.0{Fore.RESET}")
+    print(f"{Fore.GREEN}🤖 بوت التمويل المتكامل v3.0{Fore.RESET}")
     print(f"{Fore.YELLOW}👤 المطور: System{Fore.RESET}")
     print(f"{Fore.CYAN}{'='*60}{Fore.RESET}")
     
-    # انشاء التطبيق
     application = Application.builder()\
         .token(BOT_TOKEN)\
         .concurrent_updates(True)\
+        .post_init(post_init)\
         .build()
     
-    # اعداد اوامر البوت
-    application.post_init = set_bot_commands
-    
-    # انشاء معالج المحادثة
+    # معالج المحادثة
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            # حالات المستخدمين
             States.MAIN_MENU.value: [
-                CallbackQueryHandler(user_buttons_callback),
                 CallbackQueryHandler(check_subscription_callback, pattern="^check_subscription$"),
+                CallbackQueryHandler(user_buttons_callback),
+                CallbackQueryHandler(admin_buttons_callback, pattern="^admin_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
                 MessageHandler(filters.Document.ALL, handle_document),
             ],
@@ -3053,8 +2108,6 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
                 CallbackQueryHandler(user_buttons_callback),
             ],
-            
-            # حالات المديرين
             States.ADMIN_ADD_POINTS.value: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
                 CallbackQueryHandler(admin_buttons_callback),
@@ -3105,49 +2158,17 @@ def main() -> None:
                 CallbackQueryHandler(admin_buttons_callback),
             ],
         },
-        fallbacks=[
-            CommandHandler("start", start),
-            CallbackQueryHandler(user_buttons_callback),
-            CallbackQueryHandler(admin_buttons_callback, pattern="^admin_"),
-        ],
+        fallbacks=[CommandHandler("start", start)],
         per_message=False,
-        name="main_conversation",
-        persistent=False,
     )
     
     application.add_handler(conv_handler)
-    
-    # اضافة معالج للازرار خارج المحادثة
-    application.add_handler(CallbackQueryHandler(admin_buttons_callback, pattern="^admin_"))
-    application.add_handler(CallbackQueryHandler(user_buttons_callback))
-    
-    # اضافة معالج الاخطاء
     application.add_error_handler(error_handler)
-    
-    # اضافة وظائف دورية
-    job_queue = application.job_queue
-    
-    if job_queue:
-        # تنظيف يومي في الساعة 3 صباحاً
-        job_queue.run_daily(
-            daily_cleanup_job,
-            time=datetime.strptime("03:00", "%H:%M").time(),
-            name="daily_cleanup"
-        )
-        
-        # نسخ احتياطي كل 6 ساعات
-        job_queue.run_repeating(
-            backup_job,
-            interval=21600,  # 6 ساعات
-            first=10,
-            name="periodic_backup"
-        )
     
     print(f"{Fore.GREEN}✅ البوت يعمل بنجاح...{Fore.RESET}")
     print(f"{Fore.YELLOW}📝 سجل الأحداث في bot.log{Fore.RESET}")
     print(f"{Fore.CYAN}{'='*60}{Fore.RESET}")
     
-    # تشغيل البوت
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
